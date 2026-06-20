@@ -1,0 +1,145 @@
+[loop]
+name = "patent-generation-loop"
+domains = [
+  "ESS",
+  "vehicle battery BMS",
+  "battery software communication",
+  "battery software security",
+  "battery software logs",
+  "battery software data",
+  "battery software life and SOH",
+  "battery software algorithm",
+  "battery software control",
+  "ESS cloud",
+  "ESS digital twin",
+  "battery software simulator",
+  "battery software verification",
+  "battery software architecture"
+]
+max_revision_cycles = 3
+redteam_reject_terminal_after_iteration = 3
+max_items_per_run = 1
+min_claims_for_draft = 12
+min_claims_for_final = 18
+min_enablement_examples = 1
+quiet_hour_start = 23
+quiet_hour_end = 8
+heartbeat_min_interval_minutes = 45
+
+[field]
+name = "battery-industry software"
+description = "Battery-industry software tied directly to BMS, ESS, PCS, pack/cell/module, charger, SOH/SOC/SOP, battery logs/data, cloud, digital-twin, simulator, or verification boundaries."
+binding_label = "배터리 산업 SW 직접 결속"
+micro_boundary_label = "배터리 SW micro-boundary"
+micro_boundary_column = "battery SW micro-boundary"
+scope_guard_enabled = true
+strict_battery_sections = true
+filter_backlog = false
+scope_terms = [
+  "battery",
+  "bms",
+  "ess",
+  "pcs",
+  "pack",
+  "cell",
+  "module",
+  "soh",
+  "soc",
+  "sop",
+  "degradation",
+  "charging",
+  "charger",
+  "balancing",
+  "배터리",
+  "전지",
+  "셀",
+  "모듈",
+  "팩",
+  "충전",
+  "열화",
+  "수명",
+  "냉각",
+  "절연",
+  "밸런싱",
+  "진단",
+  "검증",
+  "시뮬레이터",
+  "디지털 트윈",
+  "에너지 저장"
+]
+high_risk_terms = [
+  "thermal runaway",
+  "열폭주",
+  "precharge",
+  "contactor",
+  "charger handshake",
+  "battery passport",
+  "federated",
+  "soh",
+  "ota",
+  "attestation",
+  "derating token"
+]
+
+[codex]
+enabled = true
+sandbox = "workspace-write"
+approval_policy = "never"
+timeout_seconds = 1200
+model = "gpt-5.5"
+capacity_retry_seconds = 300
+capacity_retry_max_attempts = 0
+repair_attempts = 1
+ignore_user_config = true
+ephemeral = true
+bypass_hook_trust = false
+env_allowlist = [
+  "PATH",
+  "HOME",
+  "USER",
+  "LOGNAME",
+  "SHELL",
+  "TMPDIR",
+  "LANG",
+  "LC_ALL",
+  "LC_CTYPE",
+  "CODEX_HOME"
+]
+
+[usage_guard]
+enabled = false
+check_only_before_new_idea = true
+max_weekly_used_percent = 70.0
+fail_closed_on_unknown = false
+env_var = "CODEX_WEEKLY_USED_PERCENT"
+state_path = "state/codex_usage.json"
+codex_sessions_glob = "~/.codex/sessions/**/*.jsonl"
+max_session_files = 120
+weekly_window_minutes = 10080
+
+[quality]
+require_prior_art_sources = 5
+require_independent_examiner_count = 2
+require_context_free_red_team = true
+min_prior_art_search_queries = 8
+min_closest_references = 8
+min_grade_for_pass = "A-"
+forbid_conditional_pass = true
+require_kill_or_narrow_gate = true
+final_verdict_token = "FINAL_VERDICT"
+pass_token = "DIRECT_OK"
+reject_token = "REJECT"
+
+[paths]
+archive = ""
+
+[research_sources]
+primary = [
+  "USPTO Patent Center / PatentsView / official USPTO pages",
+  "Google Patents Public Datasets on BigQuery",
+  "EPO Open Patent Services",
+  "WIPO Patentscope",
+  "Google Patents",
+  "Semantic Scholar / arXiv for non-patent literature",
+  "GitHub public repositories for software prior art"
+]

@@ -1,0 +1,21 @@
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.venv/
+build/
+dist/
+*.egg-info/
+
+# Runtime workbench data must stay private.
+logs/
+work/
+final/
+reports/
+visuals/
+state/backlog.jsonl
+state/status.json
+state/heartbeat-state.json
+state/loop.lock
+**/task_prompt.md
