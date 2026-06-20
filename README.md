@@ -1,6 +1,7 @@
 # Patent Loop Harness
 
-Reusable patent idea and drafting loop harness with field-parameterized prompts.
+Reusable patent idea and drafting loop harness with field-parameterized prompts
+and pluggable LLM runners.
 
 This public repository is intended to contain only reusable harness code,
 generic prompts, example configuration, tests, and documentation. Private
@@ -31,8 +32,43 @@ patent-loop run --dry-run --max-items 1
 The CLI uses the current working directory as the workbench root. You can also
 set `PATENT_LOOP_ROOT=/path/to/workbench`.
 
-By default, the harness lets the installed `codex` CLI choose its default model.
-Set `[codex].model` in a private workbench config when you need a pinned model.
+By default, the harness uses the `codex` runner for backward compatibility and
+lets the installed CLI choose its default model. Set `[runner].model` in a
+private workbench config when you need a pinned model.
+
+## LLM Runners
+
+The harness has a pluggable runner layer:
+
+- `codex`: runs `codex exec`
+- `claude`: runs Claude Code in print mode with `claude -p`
+- `shell`: sends the prompt to any command on stdin
+- `prompt_only`: writes prompts without invoking an LLM
+
+Select a runner in config:
+
+```toml
+[runner]
+type = "claude"
+model = "sonnet"
+
+[runner.claude]
+permission_mode = "acceptEdits"
+output_format = "text"
+```
+
+Or override it for one invocation:
+
+```bash
+patent-loop run --runner claude --max-items 1
+patent-loop run --runner prompt_only --max-items 1
+```
+
+For fully autonomous Claude Code operation, configure Claude Code locally first
+and choose the permission mode that matches your risk tolerance.
+The default usage guard applies only to the `codex` runner; set
+`[usage_guard].applies_to_runner = "all"` or a specific runner name when a
+private workbench needs different behavior.
 
 ## Public And Private Boundary
 

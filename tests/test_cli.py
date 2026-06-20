@@ -106,6 +106,35 @@ description = "Semiconductor package inspection software for recipe activation g
             self.assertIn("Runtime Patent Research Field", prompt)
             self.assertIn("semiconductor packaging control software", prompt)
 
+    def test_prompt_only_runner_writes_prompt_without_llm(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            seed = run_cli(
+                [
+                    "seed",
+                    "--field",
+                    "semiconductor packaging control software",
+                    "--field-term",
+                    "package",
+                    "--title",
+                    "Package recipe freshness gate",
+                    "--hypothesis",
+                    (
+                        "Semiconductor package recipe control software sends a package echo "
+                        "challenge, computes a residual response signature, checks calibration "
+                        "version mismatch and replay freshness, and fail-closed blocks stale "
+                        "recipe activation at a package control gate."
+                    ),
+                ],
+                root,
+            )
+            self.assertEqual(seed.returncode, 0, seed.stderr + seed.stdout)
+
+            result = run_cli(["run", "--runner", "prompt_only", "--stage-only", "idea"], root)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertIn('"dry_run": true', result.stdout)
+            self.assertEqual(len(list(root.glob("work/*_idea/task_prompt.md"))), 1)
+
     def test_artifact_paths_must_stay_inside_workspace(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             parent = Path(tmp)
@@ -133,12 +162,50 @@ description = "Semiconductor package inspection software for recipe activation g
 
     def test_codex_child_env_uses_allowlist(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))
-        from patent_loop_harness.cli import codex_child_env
+        from patent_loop_harness.cli import runner_child_env
 
         os.environ["PATENT_LOOP_TEST_SECRET"] = "do-not-forward"
         os.environ["PATENT_LOOP_TEST_ALLOWED"] = "forward-me"
-        child_env = codex_child_env({"env_allowlist": ["PATENT_LOOP_TEST_ALLOWED"]})
+        child_env = runner_child_env({"env_allowlist": ["PATENT_LOOP_TEST_ALLOWED"]})
         self.assertEqual(child_env, {"PATENT_LOOP_TEST_ALLOWED": "forward-me"})
+
+    def test_claude_runner_command_uses_print_mode(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import build_claude_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_claude = Path(tmp) / "claude"
+            fake_claude.write_text("#!/bin/sh\n", encoding="utf-8")
+            command = build_claude_command(
+                {
+                    "command": str(fake_claude),
+                    "model": "sonnet",
+                    "output_format": "text",
+                    "permission_mode": "acceptEdits",
+                    "bare": True,
+                    "no_session_persistence": True,
+                    "max_turns": 3,
+                    "query": "Execute stdin task.",
+                }
+            )
+            self.assertEqual(command[0], str(fake_claude))
+            self.assertIn("-p", command)
+            self.assertIn("Execute stdin task.", command)
+            self.assertIn("--output-format", command)
+            self.assertIn("text", command)
+            self.assertIn("--permission-mode", command)
+            self.assertIn("acceptEdits", command)
+            self.assertIn("--model", command)
+            self.assertIn("sonnet", command)
+
+    def test_usage_guard_defaults_to_codex_runner(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import usage_guard_applies_to_runner
+
+        guard_cfg = {"enabled": True}
+        self.assertTrue(usage_guard_applies_to_runner(guard_cfg, "codex"))
+        self.assertFalse(usage_guard_applies_to_runner(guard_cfg, "claude"))
+        self.assertTrue(usage_guard_applies_to_runner({"applies_to_runner": "all"}, "claude"))
 
     def test_live_pid_lock_is_not_removed_as_stale(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))

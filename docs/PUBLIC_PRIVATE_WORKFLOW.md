@@ -47,3 +47,9 @@ patent-workbench-private/
 
 The private repository should depend on `patent-loop-harness` instead of copying
 the harness source code.
+
+Runner-specific settings, credentials, local model choices, and permission modes
+belong in the private workbench config. The public repository should keep only
+safe defaults and examples for `codex`, `claude`, `shell`, and `prompt_only`.
+Usage guard policy should also stay in private config when it depends on a paid
+or rate-limited provider account.

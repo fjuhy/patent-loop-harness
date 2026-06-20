@@ -81,10 +81,9 @@ high_risk_terms = [
   "derating token"
 ]
 
-[codex]
+[runner]
+type = "codex"
 enabled = true
-sandbox = "workspace-write"
-approval_policy = "never"
 timeout_seconds = 1200
 model = ""
 capacity_retry_seconds = 300
@@ -103,16 +102,42 @@ env_allowlist = [
   "LANG",
   "LC_ALL",
   "LC_CTYPE",
-  "CODEX_HOME"
+  "CODEX_HOME",
+  "CLAUDE_CONFIG_DIR"
 ]
+
+[runner.codex]
+command = "codex"
+sandbox = "workspace-write"
+approval_policy = "never"
+ignore_user_config = true
+ephemeral = true
+bypass_hook_trust = false
+
+[runner.claude]
+command = "claude"
+output_format = "text"
+query = "Execute the task described in stdin."
+bare = false
+no_session_persistence = true
+permission_mode = "acceptEdits"
+max_turns = 0
+auth_check = true
+extra_args = []
+
+[runner.shell]
+command = []
+extra_args = []
 
 [usage_guard]
 enabled = false
+applies_to_runner = "codex"
 check_only_before_new_idea = true
 max_weekly_used_percent = 70.0
 fail_closed_on_unknown = false
 env_var = "CODEX_WEEKLY_USED_PERCENT"
 state_path = "state/codex_usage.json"
+session_glob = "~/.codex/sessions/**/*.jsonl"
 codex_sessions_glob = "~/.codex/sessions/**/*.jsonl"
 max_session_files = 120
 weekly_window_minutes = 10080

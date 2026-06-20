@@ -33,7 +33,7 @@ HEARTBEAT_STATE_PATH = ROOT / "state" / "heartbeat-state.json"
 LOCK_PATH = ROOT / "state" / "loop.lock"
 METRICS_PATH = ROOT / "logs" / "metrics.jsonl"
 PACKAGE = "patent_loop_harness"
-DEFAULT_CODEX_ENV_ALLOWLIST = [
+DEFAULT_RUNNER_ENV_ALLOWLIST = [
     "PATH",
     "HOME",
     "USER",
@@ -44,7 +44,11 @@ DEFAULT_CODEX_ENV_ALLOWLIST = [
     "LC_ALL",
     "LC_CTYPE",
     "CODEX_HOME",
+    "CLAUDE_CONFIG_DIR",
 ]
+DEFAULT_CODEX_ENV_ALLOWLIST = DEFAULT_RUNNER_ENV_ALLOWLIST
+RUNNER_TYPES = {"codex", "claude", "shell", "prompt_only"}
+RUNNER_PROVIDER_KEYS = RUNNER_TYPES
 
 TERMINAL_STATUSES = {"finalized", "finalized_out_of_scope", "rejected", "blocked"}
 PROMPTS = {
@@ -326,7 +330,7 @@ def codex_usage_from_state_file(path: Path) -> dict[str, Any] | None:
 
 
 def codex_usage_from_sessions(guard_cfg: dict[str, Any]) -> dict[str, Any] | None:
-    pattern = os.path.expanduser(str(guard_cfg.get("codex_sessions_glob", "~/.codex/sessions/**/*.jsonl")))
+    pattern = os.path.expanduser(str(guard_cfg.get("session_glob", guard_cfg.get("codex_sessions_glob", "~/.codex/sessions/**/*.jsonl"))))
     max_files = max(1, int(guard_cfg.get("max_session_files", 120)))
     weekly_window = int(guard_cfg.get("weekly_window_minutes", 10080))
     paths = [Path(path) for path in glob.glob(pattern, recursive=True)]
@@ -380,9 +384,20 @@ def codex_weekly_usage(config: dict[str, Any]) -> dict[str, Any] | None:
     return codex_usage_from_sessions(guard_cfg)
 
 
+def usage_guard_applies_to_runner(guard_cfg: dict[str, Any], runner_type: str) -> bool:
+    raw = guard_cfg.get("applies_to_runner", guard_cfg.get("runner", "codex"))
+    allowed = [value.casefold() for value in listify(raw)]
+    if not allowed:
+        return True
+    return "*" in allowed or "all" in allowed or runner_type.casefold() in allowed
+
+
 def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
     guard_cfg = config.get("usage_guard", {})
     if not bool(guard_cfg.get("enabled", False)):
+        return None
+    runner_type = str(runner_profile(config)["type"])
+    if not usage_guard_applies_to_runner(guard_cfg, runner_type):
         return None
     stage = stage_for(item)
     if bool(guard_cfg.get("check_only_before_new_idea", True)):
@@ -394,6 +409,7 @@ def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[s
         event = {
             "at": now(),
             "event": "usage_guard_unknown",
+            "runner": runner_type,
             "item_id": item.get("id"),
             "stage": stage,
             "threshold_percent": threshold,
@@ -405,7 +421,7 @@ def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[s
                 "stage": stage,
                 "item_id": item.get("id"),
                 "status": item.get("status"),
-                "reason": "codex weekly usage is unknown and fail_closed_on_unknown=true",
+                "reason": f"{runner_type} usage is unknown and fail_closed_on_unknown=true",
             }
         return None
 
@@ -413,6 +429,7 @@ def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[s
     event = {
         "at": now(),
         "event": "usage_guard_check",
+        "runner": runner_type,
         "item_id": item.get("id"),
         "stage": stage,
         "used_percent": percent,
@@ -427,7 +444,7 @@ def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[s
             "stage": stage,
             "item_id": item.get("id"),
             "status": item.get("status"),
-            "reason": f"codex weekly usage {percent:.1f}% >= {threshold:.1f}%; stop before starting a new idea",
+            "reason": f"{runner_type} usage {percent:.1f}% >= {threshold:.1f}%; stop before starting a new idea",
             "usage_percent": percent,
             "threshold_percent": threshold,
             "usage_source": usage.get("source"),
@@ -709,6 +726,63 @@ def apply_field_args(config: dict[str, Any], args: argparse.Namespace) -> dict[s
 
     updated["field"] = field_cfg
     return updated
+
+
+def add_runner_arguments(parser: argparse.ArgumentParser) -> None:
+    parser.add_argument(
+        "--runner",
+        choices=sorted(RUNNER_TYPES),
+        default="",
+        help="override LLM runner for this invocation",
+    )
+
+
+def apply_runner_args(config: dict[str, Any], args: argparse.Namespace) -> dict[str, Any]:
+    runner_arg = str(getattr(args, "runner", "") or "").strip()
+    if not runner_arg:
+        return config
+    updated = dict(config)
+    runner_cfg = dict(updated.get("runner", {}))
+    runner_cfg["type"] = runner_arg
+    updated["runner"] = runner_cfg
+    return updated
+
+
+def invocation_config(args: argparse.Namespace) -> dict[str, Any]:
+    return apply_runner_args(apply_field_args(load_config(), args), args)
+
+
+def runner_profile(config: dict[str, Any]) -> dict[str, Any]:
+    runner_cfg = config.get("runner")
+    legacy_codex = config.get("codex", {})
+    if isinstance(runner_cfg, dict) and runner_cfg:
+        common = dict(runner_cfg)
+    elif isinstance(legacy_codex, dict) and legacy_codex:
+        common = dict(legacy_codex)
+        common["type"] = "codex"
+    else:
+        common = {"type": "codex", "enabled": True}
+
+    runner_type = str(common.get("type", "codex")).strip().lower()
+    if runner_type == "none":
+        runner_type = "prompt_only"
+    if runner_type not in RUNNER_TYPES:
+        raise RuntimeError(f"unsupported runner type: {runner_type}")
+
+    provider_specific = common.get(runner_type, {})
+    merged = {key: value for key, value in common.items() if key not in RUNNER_PROVIDER_KEYS}
+    if isinstance(provider_specific, dict):
+        merged.update(provider_specific)
+    if runner_type == "codex" and isinstance(legacy_codex, dict):
+        legacy_common = {key: value for key, value in legacy_codex.items() if key not in merged}
+        merged = {**legacy_common, **merged}
+    merged["type"] = runner_type
+    merged.setdefault("enabled", True)
+    merged.setdefault("timeout_seconds", 1200)
+    merged.setdefault("capacity_retry_seconds", 300)
+    merged.setdefault("capacity_retry_max_attempts", 3)
+    merged.setdefault("repair_attempts", 1)
+    return merged
 
 
 def is_battery_profile_text(text: str) -> bool:
@@ -1315,8 +1389,17 @@ def verdict(path: Path) -> str | None:
 def is_capacity_error(result: subprocess.CompletedProcess[str]) -> bool:
     if result.returncode == 0:
         return False
-    combined = f"{result.stdout}\n{result.stderr}"
-    return "Selected model is at capacity" in combined or "model is at capacity" in combined
+    combined = f"{result.stdout}\n{result.stderr}".casefold()
+    retry_terms = [
+        "selected model is at capacity",
+        "model is at capacity",
+        "at capacity",
+        "overloaded_error",
+        "temporarily overloaded",
+        "rate_limit_error",
+        "rate limit",
+    ]
+    return any(term in combined for term in retry_terms)
 
 
 def artifact_context(item: dict[str, Any], stage: str) -> str:
@@ -1591,49 +1674,147 @@ def build_prompt(item: dict[str, Any], stage: str, output_path: Path, config: di
     ).strip() + "\n"
 
 
-def codex_child_env(codex_cfg: dict[str, Any]) -> dict[str, str]:
-    allowed = listify(codex_cfg.get("env_allowlist")) or DEFAULT_CODEX_ENV_ALLOWLIST
+def runner_child_env(runner_cfg: dict[str, Any]) -> dict[str, str]:
+    allowed = listify(runner_cfg.get("env_allowlist")) or DEFAULT_RUNNER_ENV_ALLOWLIST
     return {name: os.environ[name] for name in allowed if name in os.environ}
 
 
-def run_codex(prompt: str, output_path: Path, config: dict[str, Any], stage: str, item_id: str) -> subprocess.CompletedProcess[str]:
-    codex_path = shutil.which("codex")
-    if not codex_path:
-        raise RuntimeError("codex CLI not found on PATH")
+def codex_child_env(codex_cfg: dict[str, Any]) -> dict[str, str]:
+    return runner_child_env(codex_cfg)
 
-    output_path.parent.mkdir(parents=True, exist_ok=True)
-    last_message = ROOT / "logs" / f"codex-last-{item_id}-{stage}-{slug_time()}.md"
-    stdout_log = ROOT / "logs" / f"codex-{item_id}-{stage}-{slug_time()}.out.log"
-    stderr_log = ROOT / "logs" / f"codex-{item_id}-{stage}-{slug_time()}.err.log"
 
-    codex_cfg = config.get("codex", {})
+def executable_path(command_name: str, label: str) -> str:
+    if os.sep in command_name:
+        path = Path(command_name).expanduser()
+        if path.exists():
+            return str(path)
+    resolved = shutil.which(command_name)
+    if not resolved:
+        raise RuntimeError(f"{label} executable not found on PATH: {command_name}")
+    return resolved
+
+
+def build_codex_command(runner_cfg: dict[str, Any], last_message: Path) -> list[str]:
+    codex_path = executable_path(str(runner_cfg.get("command", "codex")), "codex")
     command = [
         codex_path,
         "exec",
         "-c",
-        f"approval_policy={json.dumps(str(codex_cfg.get('approval_policy', 'never')))}",
+        f"approval_policy={json.dumps(str(runner_cfg.get('approval_policy', 'never')))}",
         "--cd",
         str(ROOT),
         "--sandbox",
-        str(codex_cfg.get("sandbox", "workspace-write")),
+        str(runner_cfg.get("sandbox", "workspace-write")),
         "--skip-git-repo-check",
         "-o",
         str(last_message),
         "-",
     ]
-    if bool(codex_cfg.get("ignore_user_config", True)):
+    if bool(runner_cfg.get("ignore_user_config", True)):
         command.insert(2, "--ignore-user-config")
-    if bool(codex_cfg.get("ephemeral", True)):
+    if bool(runner_cfg.get("ephemeral", True)):
         command.insert(2, "--ephemeral")
-    if bool(codex_cfg.get("bypass_hook_trust", False)):
+    if bool(runner_cfg.get("bypass_hook_trust", False)):
         command.insert(2, "--dangerously-bypass-hook-trust")
-    model = str(codex_cfg.get("model", "")).strip()
+    model = str(runner_cfg.get("model", "")).strip()
     if model:
         command[2:2] = ["--model", model]
+    return command
 
-    capacity_retry_seconds = max(30, int(codex_cfg.get("capacity_retry_seconds", 300)))
-    capacity_retry_max_attempts = int(codex_cfg.get("capacity_retry_max_attempts", 3))
+
+def build_claude_command(runner_cfg: dict[str, Any]) -> list[str]:
+    claude_path = executable_path(str(runner_cfg.get("command", "claude")), "claude")
+    command = [claude_path]
+    model = str(runner_cfg.get("model", "")).strip()
+    if model:
+        command.extend(["--model", model])
+    if bool(runner_cfg.get("bare", False)):
+        command.append("--bare")
+    if bool(runner_cfg.get("no_session_persistence", True)):
+        command.append("--no-session-persistence")
+    permission_mode = str(runner_cfg.get("permission_mode", "")).strip()
+    if permission_mode:
+        command.extend(["--permission-mode", permission_mode])
+    output_format = str(runner_cfg.get("output_format", "text")).strip() or "text"
+    command.extend(["--output-format", output_format])
+    max_turns = int(runner_cfg.get("max_turns", 0))
+    if max_turns > 0:
+        command.extend(["--max-turns", str(max_turns)])
+    command.extend(listify(runner_cfg.get("extra_args")))
+    query = str(runner_cfg.get("query", "Execute the task described in stdin.")).strip()
+    command.extend(["-p", query])
+    return command
+
+
+def claude_auth_problem(runner_cfg: dict[str, Any]) -> str | None:
+    if not bool(runner_cfg.get("auth_check", True)):
+        return None
+    claude_path = executable_path(str(runner_cfg.get("command", "claude")), "claude")
+    try:
+        result = subprocess.run(
+            [claude_path, "auth", "status"],
+            text=True,
+            capture_output=True,
+            timeout=30,
+            cwd=str(ROOT),
+            env=runner_child_env(runner_cfg),
+        )
+    except subprocess.TimeoutExpired:
+        return "claude auth status timed out"
+    if result.returncode == 0:
+        return None
+    details = re.sub(r"\s+", " ", f"{result.stdout} {result.stderr}").strip()
+    suffix = f": {details}" if details else ""
+    return f"claude is not authenticated; run `claude auth login`{suffix}"
+
+
+def build_shell_command(runner_cfg: dict[str, Any]) -> list[str]:
+    raw = runner_cfg.get("command")
+    if not raw:
+        raise RuntimeError("shell runner requires [runner.shell].command")
+    command = listify(raw)
+    if not command:
+        raise RuntimeError("shell runner command is empty")
+    command[0] = executable_path(command[0], "shell runner")
+    command.extend(listify(runner_cfg.get("extra_args")))
+    return command
+
+
+def runner_stdout_message(runner_type: str, result: subprocess.CompletedProcess[str], runner_cfg: dict[str, Any]) -> str:
+    if runner_type == "claude" and str(runner_cfg.get("output_format", "text")).strip() == "json":
+        try:
+            data = json.loads(result.stdout)
+        except json.JSONDecodeError:
+            return result.stdout
+        if isinstance(data, dict) and isinstance(data.get("result"), str):
+            return data["result"]
+    return result.stdout
+
+
+def run_agent(prompt: str, output_path: Path, config: dict[str, Any], stage: str, item_id: str) -> subprocess.CompletedProcess[str]:
+    runner_cfg = runner_profile(config)
+    runner_type = str(runner_cfg["type"])
+    if runner_type == "prompt_only" or not bool(runner_cfg.get("enabled", True)):
+        return subprocess.CompletedProcess(args=[runner_type], returncode=0, stdout="", stderr="")
+
+    output_path.parent.mkdir(parents=True, exist_ok=True)
+    last_message = ROOT / "logs" / f"{runner_type}-last-{item_id}-{stage}-{slug_time()}.md"
+    stdout_log = ROOT / "logs" / f"{runner_type}-{item_id}-{stage}-{slug_time()}.out.log"
+    stderr_log = ROOT / "logs" / f"{runner_type}-{item_id}-{stage}-{slug_time()}.err.log"
+
+    if runner_type == "codex":
+        command = build_codex_command(runner_cfg, last_message)
+    elif runner_type == "claude":
+        command = build_claude_command(runner_cfg)
+    elif runner_type == "shell":
+        command = build_shell_command(runner_cfg)
+    else:
+        raise RuntimeError(f"unsupported runner type: {runner_type}")
+
+    capacity_retry_seconds = max(30, int(runner_cfg.get("capacity_retry_seconds", 300)))
+    capacity_retry_max_attempts = int(runner_cfg.get("capacity_retry_max_attempts", 3))
     attempt = 0
+    model = str(runner_cfg.get("model", "")).strip()
     while True:
         attempt += 1
         started = time.time()
@@ -1642,20 +1823,23 @@ def run_codex(prompt: str, output_path: Path, config: dict[str, Any], stage: str
             input=prompt,
             text=True,
             capture_output=True,
-            timeout=int(codex_cfg.get("timeout_seconds", 3600)),
+            timeout=int(runner_cfg.get("timeout_seconds", 3600)),
             cwd=str(ROOT),
-            env=codex_child_env(codex_cfg),
+            env=runner_child_env(runner_cfg),
         )
         duration = round(time.time() - started, 3)
         write_text(stdout_log, result.stdout)
         write_text(stderr_log, result.stderr)
+        if runner_type != "codex":
+            write_text(last_message, runner_stdout_message(runner_type, result, runner_cfg))
 
         capacity_retry = is_capacity_error(result)
         append_jsonl(
             METRICS_PATH,
             {
                 "at": now(),
-                "event": "codex_exec",
+                "event": "runner_exec",
+                "runner": runner_type,
                 "item_id": item_id,
                 "stage": stage,
                 "returncode": result.returncode,
@@ -1676,6 +1860,7 @@ def run_codex(prompt: str, output_path: Path, config: dict[str, Any], stage: str
             json.dumps(
                 {
                     "event": "capacity_retry",
+                    "runner": runner_type,
                     "item_id": item_id,
                     "stage": stage,
                     "model": model or "default",
@@ -1694,6 +1879,14 @@ def run_codex(prompt: str, output_path: Path, config: dict[str, Any], stage: str
         if last.strip():
             write_text(output_path, last)
     return result
+
+
+def run_codex(prompt: str, output_path: Path, config: dict[str, Any], stage: str, item_id: str) -> subprocess.CompletedProcess[str]:
+    updated = dict(config)
+    runner_cfg = dict(updated.get("runner", {}))
+    runner_cfg["type"] = "codex"
+    updated["runner"] = runner_cfg
+    return run_agent(prompt, output_path, updated, stage, item_id)
 
 
 def update_item_after_success(
@@ -1825,13 +2018,16 @@ def run_one(item: dict[str, Any], config: dict[str, Any], dry_run: bool = False,
     prompt_path = output_path.parent / "task_prompt.md"
     prompt = build_prompt(item, stage, output_path, config)
     write_text(prompt_path, prompt)
+    runner_cfg = runner_profile(config)
+    runner_type = str(runner_cfg["type"])
 
-    if dry_run or no_codex or not bool(config.get("codex", {}).get("enabled", True)):
+    if dry_run or no_codex or runner_type == "prompt_only" or not bool(runner_cfg.get("enabled", True)):
         append_jsonl(
             METRICS_PATH,
             {
                 "at": now(),
                 "event": "dry_run" if dry_run else "prompt_only",
+                "runner": runner_type,
                 "item_id": item["id"],
                 "stage": stage,
                 "prompt_path": str(prompt_path.relative_to(ROOT)),
@@ -1840,15 +2036,15 @@ def run_one(item: dict[str, Any], config: dict[str, Any], dry_run: bool = False,
         )
         return {"ran": True, "stage": stage, "item_id": item["id"], "prompt_path": prompt_path, "output_path": output_path, "dry_run": True}
 
-    repair_attempts = int(config.get("codex", {}).get("repair_attempts", 1))
+    repair_attempts = int(runner_cfg.get("repair_attempts", 1))
     failures: list[str] = []
     for attempt in range(repair_attempts + 1):
         if attempt:
             prompt = build_prompt(item, stage, output_path, config, repair_notes=failures)
             write_text(prompt_path, prompt)
-        result = run_codex(prompt, output_path, config, stage, item["id"])
+        result = run_agent(prompt, output_path, config, stage, item["id"])
         if result.returncode != 0:
-            failures = [f"codex returned {result.returncode}"]
+            failures = [f"{runner_type} runner returned {result.returncode}"]
         else:
             ok, failures = validate_stage(stage, output_path, config, item=item)
             if ok:
@@ -1882,7 +2078,7 @@ def next_unique_seed_id(base: str, items: list[dict[str, Any]]) -> str:
 
 def cmd_seed(args: argparse.Namespace) -> int:
     ensure_layout()
-    config = apply_field_args(load_config(), args)
+    config = invocation_config(args)
     field = field_profile(config)
     items = load_backlog()
     raw_base_id = str(args.id or args.title or field["name"])
@@ -1946,7 +2142,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
 
 def cmd_run(args: argparse.Namespace) -> int:
     ensure_layout()
-    config = apply_field_args(load_config(), args)
+    config = invocation_config(args)
     field = field_profile(config)
     if args.mode == "heartbeat" and not args.force and not args.dry_run:
         skip_reason = heartbeat_skip_reason(config)
@@ -2019,8 +2215,9 @@ def cmd_run(args: argparse.Namespace) -> int:
 
 def cmd_status(args: argparse.Namespace) -> int:
     ensure_layout()
-    config = apply_field_args(load_config(), args)
+    config = invocation_config(args)
     field = field_profile(config)
+    runner_cfg = runner_profile(config)
     items = load_backlog()
     counts: dict[str, int] = {}
     for item in items:
@@ -2030,14 +2227,20 @@ def cmd_status(args: argparse.Namespace) -> int:
     print("Patent loop status")
     print(f"- root: {ROOT}")
     print(f"- field: {field['name']}")
+    print(f"- runner: {runner_cfg['type']}")
     print(f"- backlog: {len(items)}")
     print(f"- counts: {json.dumps(counts, ensure_ascii=False, sort_keys=True)}")
     print(f"- last_run_at: {status.get('last_run_at')}")
-    usage = codex_weekly_usage(config)
-    if usage:
-        print(f"- codex_weekly_usage: {float(usage['used_percent']):.1f}% ({usage.get('source')})")
+    guard_cfg = config.get("usage_guard", {})
+    usage = codex_weekly_usage(config) if usage_guard_applies_to_runner(guard_cfg, str(runner_cfg["type"])) else None
+    if not bool(guard_cfg.get("enabled", False)):
+        print("- usage_guard: disabled")
+    elif not usage_guard_applies_to_runner(guard_cfg, str(runner_cfg["type"])):
+        print("- usage_guard: not applicable to runner")
+    elif usage:
+        print(f"- usage_guard: {float(usage['used_percent']):.1f}% ({usage.get('source')})")
     else:
-        print("- codex_weekly_usage: unknown")
+        print("- usage_guard: unknown")
     if nxt:
         print(f"- next: {nxt['id']} status={nxt.get('status')} stage={stage_for(nxt)} priority={nxt.get('priority')}")
     else:
@@ -2069,7 +2272,7 @@ def heartbeat_skip_reason(config: dict[str, Any]) -> str | None:
 
 
 def cmd_validate(args: argparse.Namespace) -> int:
-    config = apply_field_args(load_config(), args)
+    config = invocation_config(args)
     items = load_backlog()
     failures_total = 0
     for item in items:
@@ -2106,8 +2309,10 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 1 if failures_total else 0
 
 
-def cmd_doctor(_: argparse.Namespace) -> int:
+def cmd_doctor(args: argparse.Namespace) -> int:
     problems: list[str] = []
+    config: dict[str, Any] | None = None
+    runner_cfg: dict[str, Any] | None = None
     if sys.version_info < (3, 11):
         problems.append("Python 3.11+ required")
     for name in ["00_shared_rules.md", *PROMPTS.values()]:
@@ -2115,19 +2320,36 @@ def cmd_doctor(_: argparse.Namespace) -> int:
             read_prompt(name)
         except FileNotFoundError:
             problems.append(f"missing bundled prompt: {name}")
-    if shutil.which("codex") is None:
-        problems.append("codex CLI not found")
     try:
-        load_config()
+        config = invocation_config(args)
+        runner_cfg = runner_profile(config)
     except Exception as exc:  # noqa: BLE001
         problems.append(f"config parse failed: {exc}")
+    if runner_cfg and runner_cfg["type"] in {"codex", "claude"}:
+        command_name = str(runner_cfg.get("command", runner_cfg["type"]))
+        if shutil.which(command_name) is None and not Path(command_name).expanduser().exists():
+            problems.append(f"{runner_cfg['type']} executable not found: {command_name}")
+        elif runner_cfg["type"] == "claude":
+            auth_problem = claude_auth_problem(runner_cfg)
+            if auth_problem:
+                problems.append(auth_problem)
+    if runner_cfg and runner_cfg["type"] == "shell":
+        try:
+            build_shell_command(runner_cfg)
+        except Exception as exc:  # noqa: BLE001
+            problems.append(str(exc))
     if problems:
         print("Doctor found problems:")
         for problem in problems:
             print(f"- {problem}")
         return 1
     print("Doctor OK")
-    print(f"- codex: {shutil.which('codex')}")
+    if runner_cfg:
+        runner_type = str(runner_cfg["type"])
+        command_name = str(runner_cfg.get("command", runner_type))
+        print(f"- runner: {runner_type}")
+        if runner_type not in {"prompt_only", "shell"}:
+            print(f"- executable: {shutil.which(command_name) or command_name}")
     print(f"- root: {ROOT}")
     print(f"- config: {CONFIG_PATH if CONFIG_PATH.exists() else 'bundled default_config.toml'}")
     return 0
@@ -2139,6 +2361,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     seed = sub.add_parser("seed", help="Append a seed backlog item")
     add_field_arguments(seed)
+    add_runner_arguments(seed)
     seed.add_argument("--id", default="", help="optional lowercase-kebab id; -NNN suffix is added when missing")
     seed.add_argument("--title", required=True, help="seed title")
     seed.add_argument("--domain", default="", help="seed domain; defaults to the active field's first domain")
@@ -2149,25 +2372,29 @@ def build_parser() -> argparse.ArgumentParser:
 
     run = sub.add_parser("run", help="Run the next loop stage")
     add_field_arguments(run)
+    add_runner_arguments(run)
     run.add_argument("--mode", default="manual", help="caller mode label: manual, heartbeat, launchd")
     run.add_argument("--max-items", type=int, default=1)
     run.add_argument("--budget-minutes", type=int, default=0, help="reserved for scheduler policy")
     run.add_argument("--stage-only", choices=sorted(PROMPTS), default=None, help="run only items whose next stage matches")
     run.add_argument("--ignore-usage-guard", action="store_true", help="explicitly bypass the new-idea usage guard for this run")
     run.add_argument("--dry-run", action="store_true")
-    run.add_argument("--no-codex", action="store_true", help="write task prompt but do not invoke codex")
+    run.add_argument("--no-codex", "--no-runner", dest="no_codex", action="store_true", help="write task prompt but do not invoke an LLM runner")
     run.add_argument("--force", action="store_true", help="ignore heartbeat cadence checks")
     run.set_defaults(func=cmd_run)
 
     status = sub.add_parser("status", help="Show loop status")
     add_field_arguments(status)
+    add_runner_arguments(status)
     status.set_defaults(func=cmd_status)
 
     validate = sub.add_parser("validate", help="Validate known artifacts")
     add_field_arguments(validate)
+    add_runner_arguments(validate)
     validate.set_defaults(func=cmd_validate)
 
     doctor = sub.add_parser("doctor", help="Check local prerequisites")
+    add_runner_arguments(doctor)
     doctor.set_defaults(func=cmd_doctor)
 
     return parser
