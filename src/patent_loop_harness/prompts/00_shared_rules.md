@@ -34,6 +34,16 @@
 - `DIRECT_OK`는 claim-level 선행기술 매핑과 가장 강한 거절 논리를 통과한 경우에만 쓴다.
 - 최종본은 문맥 독립 문서여야 하며 "앞서 논의한 바와 같이" 같은 대화 의존 표현을 쓰지 않는다.
 
+## 실제 심사 일치도 보정
+
+- 목표는 더 엄격하거나 더 관대한 판정이 아니라, 실제 특허심사에서 나올 102/103/기재요건 판단과 최대한 일치하는 판정이다.
+- 신규성/진보성/명확성/권리범위 방어력 점수는 실체 특허성만 반영한다. Runtime Field label, micro-boundary heading/table column 같은 하네스 형식 표지가 빠진 것은 `하네스 형식/필드 바인딩 점검` 또는 `보정 지시`에 별도로 적고, 그 누락만으로 102/103/기재요건 점수를 낮추지 않는다.
+- 반대로 문서에 형식 표지가 있더라도 독립항 필수 구성에 target field의 구체 시스템/제어/데이터/검증/공정/운영 경계가 없으면 실체적으로 out-of-scope로 `REJECT`한다.
+- 진보성은 KSR식 "공지 요소를 알려진 문제에 예측 가능한 방식으로 결합했는가"를 중심으로 판단한다. 단일문헌에 전체 결합이 없다는 이유만으로 `A-`를 주지 않는다.
+- `공지 진단/검사/센서/로그 + 공지 보안/attestation/hash/MAC/freshness/token/versioning + 공지 target-field fail-safe/control/admission gate` 조합이 독립항 대부분을 설명하고, 남는 차이가 통상적인 safety-critical actuator authorization 또는 local policy enforcement라면 `DIRECT_OK`가 아니라 `REJECT`다.
+- 특히 security, attestation, secure log, remote command, freshness, HSM, latch, retained storage, signed request 계열은 모두 출발점에서 공지로 본다. target field에 적용했다는 사실만으로는 진보성이 아니다.
+- `DIRECT_OK`는 강한 KSR 조합 공격 후에도 독립항의 남는 차이가 문서 자체에서 비예측적 기술효과와 구체 구현 경로로 방어될 때만 부여한다. 신규성은 있으나 실제 office action에서 103이 B+/경계선이면 `REJECT`하고 보정 지시를 낸다.
+
 ## 안티 게이밍
 
 - 체크 조건을 약화하거나 삭제하지 않는다.

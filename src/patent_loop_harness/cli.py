@@ -1039,7 +1039,7 @@ def extract_grade(text: str, label: str) -> str | None:
             re.MULTILINE,
         )
         table_pattern = re.compile(
-            rf"^\s*\|\s*{re.escape(candidate)}\s*\|\s*([A-F][+-]?)\s*\|",
+            rf"^\s*\|\s*{re.escape(candidate)}\s*:?\s*\|\s*([A-F][+-]?)\s*\|",
             re.MULTILINE,
         )
         grades.extend(match.group(1).upper() for match in line_pattern.finditer(text))
@@ -1273,7 +1273,13 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
     elif stage == "examine":
         required = ["# 특허성 심사 보고서", "## 선행기술 후보", "## 심사관 A 판단", "## 심사관 B 판단", "## 신규성 판단", "## 진보성 판단", "FINAL_VERDICT:"]
         failures.extend([f"missing examiner section: {name}" for name in required if name not in text])
-        strict_required = ["## 검색 쿼리 로그", "## 독립항 1 구성요소별 선행기술 매핑", "## 외부 신규 심사관 리스크"]
+        strict_required = [
+            "## 검색 쿼리 로그",
+            "## 하네스 형식/필드 바인딩 점검",
+            "## 독립항 1 구성요소별 선행기술 매핑",
+            "## KSR/예측 가능한 조합 점검",
+            "## 외부 신규 심사관 리스크",
+        ]
         failures.extend([f"missing strict examiner section: {name}" for name in strict_required if name not in text])
         query_count = bullet_count(section_text(text, "검색 쿼리 로그"))
         min_queries = int(config["quality"].get("min_prior_art_search_queries", 8))
@@ -1291,8 +1297,10 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
             "## 독립항 1 구성요소 분해",
             "## 검색 쿼리 로그",
             "## 가장 가까운 선행기술 후보",
+            "## 하네스 형식/필드 바인딩 점검",
             "## 102 신규성 공격",
             "## 103 진보성 공격",
+            "## KSR/예측 가능한 조합 점검",
             "## 문서 자체의 방어 논리",
             "FINAL_VERDICT:",
         ]
@@ -1323,7 +1331,15 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
         if claims < min_claims:
             failures.append(f"claim count {claims} < {min_claims}")
     elif stage == "verify":
-        required = ["# 독립 검증 보고서", "## 통과 항목", "## 외부 신규 평가자 거절 시나리오", "## 최종 판정", "FINAL_VERDICT:"]
+        required = [
+            "# 독립 검증 보고서",
+            "## 통과 항목",
+            "## 하네스 형식/필드 바인딩 점검",
+            "## 외부 신규 평가자 거절 시나리오",
+            "## KSR/예측 가능한 조합 점검",
+            "## 최종 판정",
+            "FINAL_VERDICT:",
+        ]
         failures.extend([f"missing verifier section: {name}" for name in required if name not in text])
         if "## 심사 점수표" not in text:
             failures.append("missing verifier section: ## 심사 점수표")
@@ -1336,8 +1352,10 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
             "## 검색 쿼리 로그",
             "## 새로 확인한 외부 선행기술",
             "## 독립항 1 구성요소별 외부 매핑",
+            "## 하네스 형식/필드 바인딩 점검",
             "## 102 신규성 재공격",
             "## 103 진보성 재공격",
+            "## KSR/예측 가능한 조합 점검",
             "## 하네스 통과판정 재검토",
             "## 재판정",
             "## 심사 점수표",
@@ -1633,7 +1651,10 @@ def context_isolation_block(stage: str) -> str:
         "- Use only the stage artifact(s) under `# Existing Artifacts` and independently verifiable references as substantive evidence.\n"
         "- Treat backlog status, notes, prior pass/fail decisions, prior DIRECT_OK tokens, guardrail history, and harness metrics as procedural metadata only.\n"
         "- Do not reward the candidate because it previously advanced through the loop; re-apply the same objective examiner standard from scratch.\n"
-        "- If the document itself does not support an A- or stronger answer to novelty, inventive step, clarity/support, and claim-scope defense, reject it."
+        "- If the document itself does not support an A- or stronger answer to novelty, inventive step, clarity/support, and claim-scope defense, reject it.\n"
+        "- Separate substantive patentability from harness format compliance: missing Runtime Field labels or micro-boundary headings are format issues, not 102/103/112 defects by themselves.\n"
+        "- Still reject substantively if claim-level elements are not directly tied to the configured target field.\n"
+        "- For inventive step, apply a realistic examiner/KSR predictable-combination screen. Known security, attestation, hash/MAC, freshness, retained-log, signed-request, HSM, latch, or remote-command checks applied to a known target-field safety/control gate are not A- inventive unless the document shows a non-predictable technical coupling and effect."
         f"{verification_note}"
     )
 

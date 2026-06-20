@@ -112,6 +112,21 @@ patent-loop run \
   --max-items 1
 ```
 
+## Examiner Calibration
+
+The harness tries to approximate real patent examination rather than maximize
+either pass rate or rejection rate. Evaluation prompts separate substantive
+patentability from harness formatting:
+
+- missing runtime labels or micro-boundary headings are format issues, not
+  novelty/inventive-step defects by themselves;
+- claim-level elements still must be directly tied to the configured target
+  field;
+- inventive step uses a realistic KSR-style predictable-combination screen;
+- known security, attestation, hash/MAC, freshness, retained-log, HSM, latch,
+  or remote-command checks applied to a known field control gate are not enough
+  for `DIRECT_OK` unless the claim shows a non-predictable technical coupling.
+
 ## Tests
 
 ```bash

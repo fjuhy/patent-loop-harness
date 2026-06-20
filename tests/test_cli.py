@@ -290,6 +290,60 @@ env_var = "PATENT_LOOP_TEST_CLAUDE_USAGE"
             self.assertIn('"ran": false', result.stdout)
             self.assertIn("claude usage 80.0% >= 70.0%", result.stdout)
 
+    def test_evaluator_context_separates_format_from_patentability_and_requires_ksr(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import context_isolation_block
+
+        block = context_isolation_block("verify")
+        self.assertIn("Separate substantive patentability from harness format compliance", block)
+        self.assertIn("missing Runtime Field labels or micro-boundary headings are format issues", block)
+        self.assertIn("KSR predictable-combination screen", block)
+
+    def test_verifier_validation_requires_calibration_sections(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import load_config, validate_stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "verification.md"
+            path.write_text(
+                """
+# 독립 검증 보고서
+## 통과 항목
+통과.
+## 실패 또는 잔여 위험
+없음.
+## 외부 신규 평가자 거절 시나리오
+시나리오.
+## 심사 점수표
+| 항목 | 점수 | 이유 |
+| --- | --- | --- |
+| 신규성 | A- | ok |
+| 진보성 | A- | ok |
+| 명세서 뒷받침/명확성 | A- | ok |
+| 권리범위 방어력 | A- | ok |
+## 최종 판정
+FINAL_VERDICT: DIRECT_OK
+""".lstrip(),
+                encoding="utf-8",
+            )
+            ok, failures = validate_stage("verify", path, load_config())
+            self.assertFalse(ok)
+            self.assertIn("missing verifier section: ## 하네스 형식/필드 바인딩 점검", failures)
+            self.assertIn("missing verifier section: ## KSR/예측 가능한 조합 점검", failures)
+
+    def test_grade_parser_accepts_colon_in_table_label(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import extract_grade
+
+        text = """
+| 항목 | 점수 | 이유 |
+| --- | --- | --- |
+| 신규성: | A- | ok |
+| 진보성: | B+ | weak |
+""".lstrip()
+        self.assertEqual(extract_grade(text, "신규성"), "A-")
+        self.assertEqual(extract_grade(text, "진보성"), "B+")
+
     def test_doctor_runner_smoke_accepts_prompt_only(self) -> None:
         with tempfile.TemporaryDirectory() as tmp:
             result = run_cli(["doctor", "--runner", "prompt_only", "--runner-smoke"], Path(tmp))
