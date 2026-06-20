@@ -66,9 +66,13 @@ patent-loop run --runner prompt_only --max-items 1
 
 For fully autonomous Claude Code operation, configure Claude Code locally first
 and choose the permission mode that matches your risk tolerance.
-The default usage guard applies only to the `codex` runner; set
-`[usage_guard].applies_to_runner = "all"` or a specific runner name when a
-private workbench needs different behavior.
+The usage guard can apply to multiple runners. Codex can read
+`CODEX_WEEKLY_USED_PERCENT`, `state/codex_usage.json`, or Codex session logs.
+Claude can read `CLAUDE_WEEKLY_USED_PERCENT` or `state/claude_usage.json`; set
+`[runner.claude].max_budget_usd` to pass a per-run budget to `claude -p`.
+State files may use a simple shape such as `{"weekly_used_percent": 42.0}`.
+Use `patent-loop doctor --runner claude --runner-smoke` when you want a live
+end-to-end runner check rather than only an auth/executable check.
 
 ## Public And Private Boundary
 

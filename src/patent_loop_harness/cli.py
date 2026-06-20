@@ -9,6 +9,7 @@ import json
 import os
 from pathlib import Path
 import re
+import shlex
 import shutil
 import subprocess
 import sys
@@ -46,7 +47,6 @@ DEFAULT_RUNNER_ENV_ALLOWLIST = [
     "CODEX_HOME",
     "CLAUDE_CONFIG_DIR",
 ]
-DEFAULT_CODEX_ENV_ALLOWLIST = DEFAULT_RUNNER_ENV_ALLOWLIST
 RUNNER_TYPES = {"codex", "claude", "shell", "prompt_only"}
 RUNNER_PROVIDER_KEYS = RUNNER_TYPES
 
@@ -310,18 +310,47 @@ def nested_percent(data: dict[str, Any], paths: list[tuple[str, ...]]) -> float 
     return None
 
 
-def codex_usage_from_state_file(path: Path) -> dict[str, Any] | None:
+def usage_guard_provider_config(guard_cfg: dict[str, Any], runner_type: str) -> dict[str, Any]:
+    provider_cfg = guard_cfg.get(runner_type, {})
+    merged = dict(guard_cfg)
+    for key in RUNNER_TYPES:
+        merged.pop(key, None)
+    if isinstance(provider_cfg, dict):
+        merged.update(provider_cfg)
+    return merged
+
+
+def default_usage_env_var(runner_type: str) -> str:
+    if runner_type == "codex":
+        return "CODEX_WEEKLY_USED_PERCENT"
+    if runner_type == "claude":
+        return "CLAUDE_WEEKLY_USED_PERCENT"
+    return f"{runner_type.upper()}_WEEKLY_USED_PERCENT"
+
+
+def default_usage_state_path(runner_type: str) -> str:
+    return f"state/{runner_type}_usage.json"
+
+
+def usage_from_state_file(path: Path, runner_type: str) -> dict[str, Any] | None:
     data = load_json(path, None)
     if not isinstance(data, dict):
         return None
     percent = nested_percent(
         data,
         [
+            (f"{runner_type}_weekly_used_percent",),
+            (f"{runner_type}_used_percent",),
             ("weekly_used_percent",),
             ("used_percent",),
             ("codex_weekly_used_percent",),
+            ("claude_weekly_used_percent",),
+            ("usage", "weekly_used_percent"),
+            ("usage", "used_percent"),
+            ("weekly", "used_percent"),
             ("secondary", "used_percent"),
             ("rate_limits", "secondary", "used_percent"),
+            ("rate_limits", "weekly", "used_percent"),
         ],
     )
     if percent is None:
@@ -368,20 +397,23 @@ def codex_usage_from_sessions(guard_cfg: dict[str, Any]) -> dict[str, Any] | Non
     return None
 
 
-def codex_weekly_usage(config: dict[str, Any]) -> dict[str, Any] | None:
+def runner_usage(config: dict[str, Any], runner_type: str) -> dict[str, Any] | None:
     guard_cfg = config.get("usage_guard", {})
     if not bool(guard_cfg.get("enabled", False)):
         return None
-    env_var = str(guard_cfg.get("env_var", "CODEX_WEEKLY_USED_PERCENT"))
+    provider_cfg = usage_guard_provider_config(guard_cfg, runner_type)
+    env_var = str(provider_cfg.get("env_var", default_usage_env_var(runner_type))).strip()
     percent = parse_percent(os.environ.get(env_var))
     if percent is not None:
         return {"source": f"env:{env_var}", "used_percent": percent}
 
-    state_path = root_relative_path(guard_cfg.get("state_path", "state/codex_usage.json"))
-    state_usage = codex_usage_from_state_file(state_path)
+    state_path = root_relative_path(provider_cfg.get("state_path", default_usage_state_path(runner_type)))
+    state_usage = usage_from_state_file(state_path, runner_type)
     if state_usage:
         return state_usage
-    return codex_usage_from_sessions(guard_cfg)
+    if runner_type == "codex":
+        return codex_usage_from_sessions(provider_cfg)
+    return None
 
 
 def usage_guard_applies_to_runner(guard_cfg: dict[str, Any], runner_type: str) -> bool:
@@ -399,12 +431,13 @@ def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[s
     runner_type = str(runner_profile(config)["type"])
     if not usage_guard_applies_to_runner(guard_cfg, runner_type):
         return None
+    provider_cfg = usage_guard_provider_config(guard_cfg, runner_type)
     stage = stage_for(item)
-    if bool(guard_cfg.get("check_only_before_new_idea", True)):
+    if bool(provider_cfg.get("check_only_before_new_idea", True)):
         if stage != "idea" or item.get("status", "seed") != "seed":
             return None
-    usage = codex_weekly_usage(config)
-    threshold = float(guard_cfg.get("max_weekly_used_percent", 70.0))
+    usage = runner_usage(config, runner_type)
+    threshold = float(provider_cfg.get("max_weekly_used_percent", 70.0))
     if usage is None:
         event = {
             "at": now(),
@@ -415,7 +448,7 @@ def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[s
             "threshold_percent": threshold,
         }
         append_jsonl(METRICS_PATH, event)
-        if bool(guard_cfg.get("fail_closed_on_unknown", False)):
+        if bool(provider_cfg.get("fail_closed_on_unknown", False)):
             return {
                 "ran": False,
                 "stage": stage,
@@ -637,6 +670,14 @@ def listify(value: Any) -> list[str]:
             if text:
                 output.append(text)
     return output
+
+
+def runner_argv(value: Any) -> list[str]:
+    if value is None:
+        return []
+    if isinstance(value, (list, tuple)):
+        return [str(part) for part in value if str(part)]
+    return shlex.split(str(value))
 
 
 def merge_unique(*groups: list[str]) -> list[str]:
@@ -1679,10 +1720,6 @@ def runner_child_env(runner_cfg: dict[str, Any]) -> dict[str, str]:
     return {name: os.environ[name] for name in allowed if name in os.environ}
 
 
-def codex_child_env(codex_cfg: dict[str, Any]) -> dict[str, str]:
-    return runner_child_env(codex_cfg)
-
-
 def executable_path(command_name: str, label: str) -> str:
     if os.sep in command_name:
         path = Path(command_name).expanduser()
@@ -1740,7 +1777,10 @@ def build_claude_command(runner_cfg: dict[str, Any]) -> list[str]:
     max_turns = int(runner_cfg.get("max_turns", 0))
     if max_turns > 0:
         command.extend(["--max-turns", str(max_turns)])
-    command.extend(listify(runner_cfg.get("extra_args")))
+    max_budget_usd = float(runner_cfg.get("max_budget_usd", 0) or 0)
+    if max_budget_usd > 0:
+        command.extend(["--max-budget-usd", str(max_budget_usd)])
+    command.extend(runner_argv(runner_cfg.get("extra_args")))
     query = str(runner_cfg.get("query", "Execute the task described in stdin.")).strip()
     command.extend(["-p", query])
     return command
@@ -1772,11 +1812,11 @@ def build_shell_command(runner_cfg: dict[str, Any]) -> list[str]:
     raw = runner_cfg.get("command")
     if not raw:
         raise RuntimeError("shell runner requires [runner.shell].command")
-    command = listify(raw)
+    command = runner_argv(raw)
     if not command:
         raise RuntimeError("shell runner command is empty")
     command[0] = executable_path(command[0], "shell runner")
-    command.extend(listify(runner_cfg.get("extra_args")))
+    command.extend(runner_argv(runner_cfg.get("extra_args")))
     return command
 
 
@@ -2007,7 +2047,7 @@ def record_guardrail(stage: str, item: dict[str, Any], failures: list[str]) -> N
     )
 
 
-def run_one(item: dict[str, Any], config: dict[str, Any], dry_run: bool = False, no_codex: bool = False) -> dict[str, Any]:
+def run_one(item: dict[str, Any], config: dict[str, Any], dry_run: bool = False, no_runner: bool = False) -> dict[str, Any]:
     stage = stage_for(item)
     if not stage:
         return {"ran": False, "reason": f"no runnable stage for status={item.get('status')}"}
@@ -2021,7 +2061,7 @@ def run_one(item: dict[str, Any], config: dict[str, Any], dry_run: bool = False,
     runner_cfg = runner_profile(config)
     runner_type = str(runner_cfg["type"])
 
-    if dry_run or no_codex or runner_type == "prompt_only" or not bool(runner_cfg.get("enabled", True)):
+    if dry_run or no_runner or runner_type == "prompt_only" or not bool(runner_cfg.get("enabled", True)):
         append_jsonl(
             METRICS_PATH,
             {
@@ -2170,7 +2210,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 if guard_result:
                     results.append(guard_result)
                     break
-            result = run_one(item, config, dry_run=args.dry_run, no_codex=args.no_codex)
+            result = run_one(item, config, dry_run=args.dry_run, no_runner=args.no_runner)
             results.append(result)
             if result.get("dry_run"):
                 break
@@ -2232,10 +2272,11 @@ def cmd_status(args: argparse.Namespace) -> int:
     print(f"- counts: {json.dumps(counts, ensure_ascii=False, sort_keys=True)}")
     print(f"- last_run_at: {status.get('last_run_at')}")
     guard_cfg = config.get("usage_guard", {})
-    usage = codex_weekly_usage(config) if usage_guard_applies_to_runner(guard_cfg, str(runner_cfg["type"])) else None
+    runner_type = str(runner_cfg["type"])
+    usage = runner_usage(config, runner_type) if usage_guard_applies_to_runner(guard_cfg, runner_type) else None
     if not bool(guard_cfg.get("enabled", False)):
         print("- usage_guard: disabled")
-    elif not usage_guard_applies_to_runner(guard_cfg, str(runner_cfg["type"])):
+    elif not usage_guard_applies_to_runner(guard_cfg, runner_type):
         print("- usage_guard: not applicable to runner")
     elif usage:
         print(f"- usage_guard: {float(usage['used_percent']):.1f}% ({usage.get('source')})")
@@ -2309,6 +2350,33 @@ def cmd_validate(args: argparse.Namespace) -> int:
     return 1 if failures_total else 0
 
 
+def runner_smoke_check(config: dict[str, Any], runner_cfg: dict[str, Any]) -> str | None:
+    runner_type = str(runner_cfg["type"])
+    if runner_type == "prompt_only":
+        return None
+    output_path = ROOT / "state" / f"runner-smoke-{runner_type}-{slug_time()}.txt"
+    prompt = f"Write exactly RUNNER_SMOKE_OK, with no newline, to this file path: {output_path}\n"
+    try:
+        result = run_agent(prompt, output_path, config, "doctor_smoke", f"{runner_type}-smoke")
+    except Exception as exc:  # noqa: BLE001
+        return f"{runner_type} smoke check failed to start: {exc}"
+    if result.returncode != 0:
+        details = re.sub(r"\s+", " ", f"{result.stdout} {result.stderr}").strip()
+        suffix = f": {details[:500]}" if details else ""
+        return f"{runner_type} smoke check returned {result.returncode}{suffix}"
+    try:
+        text = output_path.read_text(encoding="utf-8").strip()
+    except OSError as exc:
+        return f"{runner_type} smoke check did not write output: {exc}"
+    if text != "RUNNER_SMOKE_OK":
+        return f"{runner_type} smoke check wrote unexpected output: {text[:120]!r}"
+    try:
+        output_path.unlink()
+    except OSError:
+        pass
+    return None
+
+
 def cmd_doctor(args: argparse.Namespace) -> int:
     problems: list[str] = []
     config: dict[str, Any] | None = None
@@ -2338,6 +2406,10 @@ def cmd_doctor(args: argparse.Namespace) -> int:
             build_shell_command(runner_cfg)
         except Exception as exc:  # noqa: BLE001
             problems.append(str(exc))
+    if runner_cfg and bool(getattr(args, "runner_smoke", False)) and not problems:
+        smoke_problem = runner_smoke_check(config or {}, runner_cfg)
+        if smoke_problem:
+            problems.append(smoke_problem)
     if problems:
         print("Doctor found problems:")
         for problem in problems:
@@ -2379,7 +2451,7 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--stage-only", choices=sorted(PROMPTS), default=None, help="run only items whose next stage matches")
     run.add_argument("--ignore-usage-guard", action="store_true", help="explicitly bypass the new-idea usage guard for this run")
     run.add_argument("--dry-run", action="store_true")
-    run.add_argument("--no-codex", "--no-runner", dest="no_codex", action="store_true", help="write task prompt but do not invoke an LLM runner")
+    run.add_argument("--no-codex", "--no-runner", dest="no_runner", action="store_true", help="write task prompt but do not invoke an LLM runner")
     run.add_argument("--force", action="store_true", help="ignore heartbeat cadence checks")
     run.set_defaults(func=cmd_run)
 
@@ -2395,6 +2467,7 @@ def build_parser() -> argparse.ArgumentParser:
 
     doctor = sub.add_parser("doctor", help="Check local prerequisites")
     add_runner_arguments(doctor)
+    doctor.add_argument("--runner-smoke", action="store_true", help="run a live smoke task through the selected runner")
     doctor.set_defaults(func=cmd_doctor)
 
     return parser
