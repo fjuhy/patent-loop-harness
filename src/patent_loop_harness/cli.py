@@ -145,6 +145,33 @@ def save_backlog(items: list[dict[str, Any]]) -> None:
     write_text(BACKLOG_PATH, "\n".join(lines) + ("\n" if lines else ""))
 
 
+def pid_is_running(pid: int) -> bool:
+    if pid <= 0:
+        return False
+    try:
+        os.kill(pid, 0)
+    except ProcessLookupError:
+        return False
+    except PermissionError:
+        return True
+    except OSError:
+        return False
+    return True
+
+
+def lock_owner_pid(path: Path) -> int | None:
+    try:
+        data = json.loads(path.read_text(encoding="utf-8"))
+    except (FileNotFoundError, json.JSONDecodeError, OSError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    try:
+        return int(data.get("pid"))
+    except (TypeError, ValueError):
+        return None
+
+
 def ensure_layout() -> None:
     for rel in ["config", "prompts", "state", "work", "final", "reports", "visuals", "logs", "memory"]:
         (ROOT / rel).mkdir(parents=True, exist_ok=True)
@@ -160,8 +187,11 @@ class LoopLock:
         self.path.parent.mkdir(parents=True, exist_ok=True)
         if self.path.exists():
             age = time.time() - self.path.stat().st_mtime
-            if age < self.stale_seconds:
-                raise RuntimeError(f"Loop already running: {self.path}")
+            pid = lock_owner_pid(self.path)
+            if pid is not None and pid_is_running(pid):
+                raise RuntimeError(f"Loop already running: {self.path} pid={pid}")
+            if age < self.stale_seconds and pid is None:
+                raise RuntimeError(f"Loop lock is present and not stale yet: {self.path}")
             self.path.unlink()
         fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
@@ -223,6 +253,25 @@ def root_relative_path(raw: Any) -> Path:
     if not path.is_absolute():
         path = ROOT / path
     return path
+
+
+def workspace_path(raw: Any, label: str = "path") -> Path:
+    path = Path(str(raw)).expanduser()
+    if not path.is_absolute():
+        path = ROOT / path
+    resolved = path.resolve(strict=False)
+    try:
+        resolved.relative_to(ROOT)
+    except ValueError as exc:
+        raise RuntimeError(f"{label} escapes workspace root: {raw}") from exc
+    return resolved
+
+
+def safe_item_id(item: dict[str, Any]) -> str:
+    item_id = str(item.get("id", "")).strip()
+    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*-\d{3}", item_id):
+        raise RuntimeError(f"unsafe backlog item id: {item_id!r}")
+    return item_id
 
 
 def parse_percent(raw: Any) -> float | None:
@@ -672,8 +721,15 @@ def field_profile(config: dict[str, Any]) -> dict[str, Any]:
     domains = listify(field_cfg.get("domains")) or listify(config.get("loop", {}).get("domains"))
     name = str(field_cfg.get("name") or DEFAULT_FIELD_NAME).strip()
     description = str(field_cfg.get("description") or DEFAULT_FIELD_DESCRIPTION).strip()
-    scope_terms = listify(field_cfg.get("scope_terms")) or BATTERY_SW_SCOPE_TERMS
-    profile_text = " ".join([name, description, " ".join(domains), " ".join(scope_terms)])
+    configured_scope_terms = listify(field_cfg.get("scope_terms"))
+    profile_text_without_scope = " ".join([name, description, " ".join(domains)])
+    if configured_scope_terms:
+        scope_terms = configured_scope_terms
+    elif is_battery_profile_text(profile_text_without_scope):
+        scope_terms = BATTERY_SW_SCOPE_TERMS
+    else:
+        scope_terms = field_terms_from_text(profile_text_without_scope)
+    profile_text = " ".join([profile_text_without_scope, " ".join(scope_terms)])
     battery_default = is_battery_profile_text(profile_text)
     high_risk_terms = listify(field_cfg.get("high_risk_terms"))
     if not high_risk_terms and battery_default:
@@ -1305,9 +1361,7 @@ def artifact_context(item: dict[str, Any], stage: str) -> str:
         raw = item.get(key)
         if not raw:
             continue
-        path = Path(raw)
-        if not path.is_absolute():
-            path = ROOT / raw
+        path = workspace_path(raw, label=f"{key} artifact path")
         text = read_text(path)
         if text:
             chunks.append(f"## {label}: {path}\n\n{text[:50000]}")
@@ -1353,7 +1407,7 @@ def duplicate_avoidance_context(item: dict[str, Any], stage: str) -> str:
         elif status == "finalized":
             lesson = "successful reference; do not duplicate final claim skeleton"
         elif status == "finalized_out_of_scope":
-            lesson = "technically finalized but outside battery software scope; do not count or repeat"
+            lesson = "technically finalized but outside target field scope; do not count or repeat"
         elif status == "rejected":
             lesson = latest_note_summary(other) or "rejected; avoid same closest-art and control-gate skeleton"
         elif status == "blocked":
@@ -1461,15 +1515,16 @@ def context_isolation_block(stage: str) -> str:
 
 
 def output_path_for(item: dict[str, Any], stage: str) -> Path:
-    run_id = f"{slug_time()}_{item['id']}_{stage}"
+    item_id = safe_item_id(item)
+    run_id = f"{slug_time()}_{item_id}_{stage}"
     if stage == "finalize":
-        return ROOT / "final" / f"{item['id']}_final_{slug_time()}.md"
+        return workspace_path(ROOT / "final" / f"{item_id}_final_{slug_time()}.md", label="final output path")
     if stage == "verify":
-        return ROOT / "reports" / f"{item['id']}_verification_{slug_time()}.md"
+        return workspace_path(ROOT / "reports" / f"{item_id}_verification_{slug_time()}.md", label="verification output path")
     if stage == "external_spotcheck":
-        return ROOT / "reports" / f"{item['id']}_external_spotcheck_{slug_time()}.md"
+        return workspace_path(ROOT / "reports" / f"{item_id}_external_spotcheck_{slug_time()}.md", label="external spotcheck output path")
     if stage == "visualize":
-        return ROOT / "visuals" / f"{item['id']}_overview_{slug_time()}.html"
+        return workspace_path(ROOT / "visuals" / f"{item_id}_overview_{slug_time()}.html", label="visual output path")
     filename = {
         "idea": "01_idea.md",
         "research": "015_prior_art_gate.md",
@@ -1478,7 +1533,7 @@ def output_path_for(item: dict[str, Any], stage: str) -> Path:
         "redteam": "035_context_free_red_team.md",
         "revise": "04_revised_draft.md",
     }[stage]
-    return ROOT / "work" / run_id / filename
+    return workspace_path(ROOT / "work" / run_id / filename, label="stage output path")
 
 
 def build_prompt(item: dict[str, Any], stage: str, output_path: Path, config: dict[str, Any], repair_notes: list[str] | None = None) -> str:
@@ -1577,7 +1632,7 @@ def run_codex(prompt: str, output_path: Path, config: dict[str, Any], stage: str
         command[2:2] = ["--model", model]
 
     capacity_retry_seconds = max(30, int(codex_cfg.get("capacity_retry_seconds", 300)))
-    capacity_retry_max_attempts = int(codex_cfg.get("capacity_retry_max_attempts", 0))
+    capacity_retry_max_attempts = int(codex_cfg.get("capacity_retry_max_attempts", 3))
     attempt = 0
     while True:
         attempt += 1
@@ -1830,7 +1885,8 @@ def cmd_seed(args: argparse.Namespace) -> int:
     config = apply_field_args(load_config(), args)
     field = field_profile(config)
     items = load_backlog()
-    base_id = str(args.id or slugify_id(args.title or field["name"]))
+    raw_base_id = str(args.id or args.title or field["name"])
+    base_id = raw_base_id if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*-\d{3}", raw_base_id) else slugify_id(raw_base_id)
     item_id = next_unique_seed_id(base_id, items)
     domain = str(args.domain or (field["domains"][0] if field["domains"] else field["name"]))
     item = {
@@ -2035,7 +2091,12 @@ def cmd_validate(args: argparse.Namespace) -> int:
         for stage, raw in checks:
             if not raw:
                 continue
-            path = ROOT / raw
+            try:
+                path = workspace_path(raw, label=f"{item.get('id', '<missing-id>')} {stage} artifact path")
+            except RuntimeError as exc:
+                failures_total += 1
+                print(f"FAIL {item.get('id', '<missing-id>')} {stage} {raw}: {exc}")
+                continue
             ok, failures = validate_stage(stage, path, config, item=item)
             if ok:
                 print(f"OK {item['id']} {stage} {raw}")

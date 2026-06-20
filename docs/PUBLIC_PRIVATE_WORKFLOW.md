@@ -24,8 +24,9 @@ or commit messages that should not become public.
 3. Search the patch for private paths, invention titles, names, and generated
    artifacts.
 4. Add or update tests in this repository.
-5. Commit the cleaned patch in the public repository.
-6. Update the private workbench dependency to the new public commit or version.
+5. Run `git ls-files` and confirm no workbench runtime paths are tracked.
+6. Commit the cleaned patch in the public repository.
+7. Update the private workbench dependency to the new public commit or version.
 
 ## Private Workbench Layout
 

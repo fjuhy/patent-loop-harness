@@ -7,15 +7,22 @@ __pycache__/
 build/
 dist/
 *.egg-info/
+.env
+.env.*
+*.pem
+*.key
 
 # Runtime workbench data must stay private.
-logs/
-work/
-final/
-reports/
-visuals/
-state/backlog.jsonl
-state/status.json
-state/heartbeat-state.json
-state/loop.lock
+/backup/
+/config/
+/final/
+/logs/
+/memory/
+/prompts/
+/reports/
+/state/
+/visuals/
+/work/
+*.pdf
+*.zip
 **/task_prompt.md

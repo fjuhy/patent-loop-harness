@@ -31,6 +31,9 @@ patent-loop run --dry-run --max-items 1
 The CLI uses the current working directory as the workbench root. You can also
 set `PATENT_LOOP_ROOT=/path/to/workbench`.
 
+By default, the harness lets the installed `codex` CLI choose its default model.
+Set `[codex].model` in a private workbench config when you need a pinned model.
+
 ## Public And Private Boundary
 
 Public repository:
