@@ -21,7 +21,6 @@ redteam_reject_terminal_after_iteration = 3
 max_items_per_run = 1
 min_claims_for_draft = 12
 min_claims_for_final = 18
-min_enablement_examples = 1
 quiet_hour_start = 23
 quiet_hour_end = 8
 heartbeat_min_interval_minutes = 45
@@ -150,28 +149,10 @@ env_var = "CLAUDE_WEEKLY_USED_PERCENT"
 state_path = "state/claude_usage.json"
 
 [quality]
-require_prior_art_sources = 5
-require_independent_examiner_count = 2
-require_context_free_red_team = true
 min_prior_art_search_queries = 8
 min_closest_references = 8
 min_grade_for_pass = "A-"
 forbid_conditional_pass = true
-require_kill_or_narrow_gate = true
-final_verdict_token = "FINAL_VERDICT"
-pass_token = "DIRECT_OK"
-reject_token = "REJECT"
 
 [paths]
 archive = ""
-
-[research_sources]
-primary = [
-  "USPTO Patent Center / PatentsView / official USPTO pages",
-  "Google Patents Public Datasets on BigQuery",
-  "EPO Open Patent Services",
-  "WIPO Patentscope",
-  "Google Patents",
-  "Semantic Scholar / arXiv for non-patent literature",
-  "GitHub public repositories for software prior art"
-]

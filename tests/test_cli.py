@@ -331,6 +331,54 @@ FINAL_VERDICT: DIRECT_OK
             self.assertIn("missing verifier section: ## 하네스 형식/필드 바인딩 점검", failures)
             self.assertIn("missing verifier section: ## KSR/예측 가능한 조합 점검", failures)
 
+    def test_verifier_validation_rejects_invalid_final_verdict(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import load_config, validate_stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "verification.md"
+            path.write_text(
+                """
+# 독립 검증 보고서
+## 통과 항목
+통과.
+## 하네스 형식/필드 바인딩 점검
+정상.
+## 외부 신규 평가자 거절 시나리오
+없음.
+## KSR/예측 가능한 조합 점검
+정상.
+## 심사 점수표
+| 항목 | 점수 | 이유 |
+| --- | --- | --- |
+| 신규성 | A- | ok |
+| 진보성 | A- | ok |
+| 명세서 뒷받침/명확성 | A- | ok |
+| 권리범위 방어력 | A- | ok |
+## 최종 판정
+FINAL_VERDICT: MAYBE
+""".lstrip(),
+                encoding="utf-8",
+            )
+            ok, failures = validate_stage("verify", path, load_config())
+            self.assertFalse(ok)
+            self.assertIn("missing valid FINAL_VERDICT token", failures)
+
+    def test_claim_count_uses_claim_section_claim_starts_only(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import count_claims
+
+        text = (
+            "# 최종 특허 명세서 후보\n"
+            "## 독립항 1 구성요소 매핑\n"
+            + "\n".join(f"- 청구항 1 구성요소 반복 {index}" for index in range(30))
+            + "\n## 청구범위\n"
+            "청구항 1. 실제 청구항 하나.\n"
+            "## 요약서\n"
+            "요약.\n"
+        )
+        self.assertEqual(count_claims(text), 1)
+
     def test_grade_parser_accepts_colon_in_table_label(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))
         from patent_loop_harness.cli import extract_grade
@@ -349,6 +397,13 @@ FINAL_VERDICT: DIRECT_OK
             result = run_cli(["doctor", "--runner", "prompt_only", "--runner-smoke"], Path(tmp))
             self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertIn("Doctor OK", result.stdout)
+
+    def test_run_max_items_default_allows_config_default(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import build_parser
+
+        args = build_parser().parse_args(["run"])
+        self.assertIsNone(args.max_items)
 
     def test_live_pid_lock_is_not_removed_as_stale(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))

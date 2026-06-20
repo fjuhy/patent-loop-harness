@@ -486,11 +486,12 @@ def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[s
 
 
 def count_claims(text: str) -> int:
+    claims_text = section_text(text, "청구범위") or text
     patterns = [
-        r"청구항\s*\d+",
+        r"^\s*(?:[-*]\s*)?청구항\s*\d+\b",
         r"^\s*\d+\.\s+.*?청구",
     ]
-    counts = [len(re.findall(pattern, text, flags=re.MULTILINE)) for pattern in patterns]
+    counts = [len(re.findall(pattern, claims_text, flags=re.MULTILINE)) for pattern in patterns]
     return max(counts) if counts else 0
 
 
@@ -1345,6 +1346,8 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
             failures.append("missing verifier section: ## 심사 점수표")
         if verdict(path) == "DIRECT_OK":
             failures.extend(grade_failures(text, config))
+        if not has_any(text, ["FINAL_VERDICT: DIRECT_OK", "FINAL_VERDICT: REJECT"]):
+            failures.append("missing valid FINAL_VERDICT token")
     elif stage == "external_spotcheck":
         required = [
             "# 외부 선행기술 Spot Check 보고서",
@@ -1942,14 +1945,6 @@ def run_agent(prompt: str, output_path: Path, config: dict[str, Any], stage: str
     return result
 
 
-def run_codex(prompt: str, output_path: Path, config: dict[str, Any], stage: str, item_id: str) -> subprocess.CompletedProcess[str]:
-    updated = dict(config)
-    runner_cfg = dict(updated.get("runner", {}))
-    runner_cfg["type"] = "codex"
-    updated["runner"] = runner_cfg
-    return run_agent(prompt, output_path, updated, stage, item_id)
-
-
 def update_item_after_success(
     item: dict[str, Any],
     stage: str,
@@ -2210,7 +2205,7 @@ def cmd_run(args: argparse.Namespace) -> int:
         if skip_reason:
             print(json.dumps({"ran": False, "mode": args.mode, "reason": skip_reason}, ensure_ascii=False, sort_keys=True))
             return 0
-    max_items = args.max_items or int(config["loop"].get("max_items_per_run", 1))
+    max_items = args.max_items if args.max_items is not None else int(config["loop"].get("max_items_per_run", 1))
     with LoopLock(LOCK_PATH):
         items = load_backlog()
         if not items:
@@ -2467,8 +2462,7 @@ def build_parser() -> argparse.ArgumentParser:
     add_field_arguments(run)
     add_runner_arguments(run)
     run.add_argument("--mode", default="manual", help="caller mode label: manual, heartbeat, launchd")
-    run.add_argument("--max-items", type=int, default=1)
-    run.add_argument("--budget-minutes", type=int, default=0, help="reserved for scheduler policy")
+    run.add_argument("--max-items", type=int, default=None)
     run.add_argument("--stage-only", choices=sorted(PROMPTS), default=None, help="run only items whose next stage matches")
     run.add_argument("--ignore-usage-guard", action="store_true", help="explicitly bypass the new-idea usage guard for this run")
     run.add_argument("--dry-run", action="store_true")
