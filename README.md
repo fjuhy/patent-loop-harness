@@ -36,6 +36,18 @@ By default, the harness uses the `codex` runner for backward compatibility and
 lets the installed CLI choose its default model. Set `[runner].model` in a
 private workbench config when you need a pinned model.
 
+## Agent Skill
+
+This repository also ships an Agent Skills-compatible wrapper at
+`skills/patent-loop/`. Install or copy that folder into a skills directory for
+Codex, Claude Code, OpenCode, Hermes, OpenClaw, or another compatible agent so
+the agent can discover the safe `patent-loop` CLI workflow.
+
+The skill does not replace the CLI. It teaches agents to inspect the active
+workbench, respect the public/private repository boundary, prefer status,
+doctor, validate, and dry-run commands before live runs, and use
+`PATENT_LOOP_ROOT` when the workbench is outside the current directory.
+
 ## LLM Runners
 
 The harness has a pluggable runner layer:

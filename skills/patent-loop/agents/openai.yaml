@@ -1,0 +1,4 @@
+interface:
+  display_name: "Patent Loop"
+  short_description: "Run patent idea and drafting loops"
+  default_prompt: "Use $patent-loop to check the workbench status and suggest the next safe patent-loop action."
