@@ -2,12 +2,11 @@ from __future__ import annotations
 
 import json
 import os
-from pathlib import Path
 import subprocess
 import sys
 import tempfile
 import unittest
-
+from pathlib import Path
 
 REPO_ROOT = Path(__file__).resolve().parents[1]
 
@@ -159,8 +158,12 @@ description = "Semiconductor package inspection software for recipe activation g
             (root / "state" / "backlog.jsonl").write_text(json.dumps(backlog_item) + "\n", encoding="utf-8")
 
             result = run_cli(["run", "--dry-run", "--stage-only", "examine"], root)
-            self.assertNotEqual(result.returncode, 0)
+            # A workspace-escape in one item is isolated: that item is blocked and the
+            # reason is surfaced, but the run does not abort the whole backlog.
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
             self.assertIn("escapes workspace root", result.stderr + result.stdout)
+            backlog = (root / "state" / "backlog.jsonl").read_text(encoding="utf-8")
+            self.assertIn('"status": "blocked"', backlog)
 
     def test_runner_child_env_uses_allowlist(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -417,6 +420,166 @@ FINAL_VERDICT: MAYBE
             with self.assertRaisesRegex(RuntimeError, "Loop already running"):
                 with LoopLock(lock_path, stale_seconds=1):
                     pass
+
+    def test_deep_merge_overrides_scalars_and_recurses(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import deep_merge
+
+        base = {"a": 1, "b": {"x": 1, "y": 2}}
+        override = {"b": {"y": 3, "z": 4}, "c": 5}
+        self.assertEqual(deep_merge(base, override), {"a": 1, "b": {"x": 1, "y": 3, "z": 4}, "c": 5})
+
+    def test_partial_config_does_not_crash_run(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "config").mkdir()
+            (root / "config" / "patent_loop.toml").write_text('[runner]\ntype = "prompt_only"\n', encoding="utf-8")
+            (root / "state").mkdir()
+            (root / "state" / "backlog.jsonl").write_text(
+                json.dumps(
+                    {
+                        "id": "merge-regression-001",
+                        "title": "t",
+                        "domain": "d",
+                        "hypothesis": "h" * 120,
+                        "priority": 100,
+                        "status": "draft_ready",
+                        "draft_path": "work/x/02_draft.md",
+                        "created_at": "2026-01-01T00:00:00+00:00",
+                        "updated_at": "2026-01-01T00:00:00+00:00",
+                    }
+                )
+                + "\n",
+                encoding="utf-8",
+            )
+            result = run_cli(["run", "--dry-run"], root)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            self.assertNotIn("'loop'", result.stderr)
+            self.assertNotIn("'quality'", result.stderr)
+
+    def test_section_text_allows_annotated_heading(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import bullet_count, section_text
+
+        text = "## 검색 쿼리 로그 (8건)\n- q1\n- q2\n## 다음\n본문\n"
+        section = section_text(text, "검색 쿼리 로그")
+        self.assertIn("q1", section)
+        self.assertEqual(bullet_count(section), 2)
+
+    def test_count_claims_scopes_to_numbered_claims_heading(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import count_claims
+
+        text = (
+            "## 8. 실시형태\n"
+            + "\n".join(f"청구항 1 설명 반복 {i}" for i in range(20))
+            + "\n## 9. 청구범위\n청구항 1. 첫째.\n청구항 2. 둘째.\n## 10. 요약\n"
+        )
+        self.assertEqual(count_claims(text), 2)
+
+    def test_codex_command_includes_search_flag(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import build_codex_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "codex"
+            fake.write_text("#!/bin/sh\n", encoding="utf-8")
+            last = Path(tmp) / "last.md"
+            self.assertIn("--search", build_codex_command({"command": str(fake), "web_search": True}, last))
+            self.assertNotIn("--search", build_codex_command({"command": str(fake), "web_search": False}, last))
+
+    def test_claude_command_enables_web_search_tools(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import build_claude_command
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake = Path(tmp) / "claude"
+            fake.write_text("#!/bin/sh\n", encoding="utf-8")
+            cmd = build_claude_command({"command": str(fake), "web_search": True})
+            self.assertIn("--allowedTools", cmd)
+            self.assertIn("WebSearch,WebFetch", cmd)
+
+    def test_web_search_evidence_and_requirement(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        import subprocess as sp
+
+        from patent_loop_harness.cli import web_search_evidence, web_search_requirement_failure
+
+        self.assertTrue(web_search_evidence("codex", "", "thinking\nweb search: LTC6811 datasheet\n"))
+        self.assertFalse(web_search_evidence("codex", "no tools used", ""))
+        self.assertTrue(web_search_evidence("claude", '{"usage":{"server_tool_use":{"web_search_requests":2}}}', ""))
+        self.assertFalse(web_search_evidence("claude", '{"usage":{"server_tool_use":{"web_search_requests":0}}}', ""))
+        self.assertFalse(web_search_evidence("claude", "검색 쿼리 로그에 web search 라고 적었다", ""))
+
+        searched = sp.CompletedProcess([], 0, stdout="", stderr="web search: foo")
+        unsearched = sp.CompletedProcess([], 0, stdout="report mentions search", stderr="")
+        self.assertIsNone(web_search_requirement_failure("examine", {"type": "codex", "require_web_search": True}, searched))
+        self.assertIsNotNone(web_search_requirement_failure("examine", {"type": "codex", "require_web_search": True}, unsearched))
+        self.assertIsNone(web_search_requirement_failure("draft", {"type": "codex", "require_web_search": True}, unsearched))
+        self.assertIsNone(web_search_requirement_failure("examine", {"type": "codex", "require_web_search": False}, unsearched))
+        self.assertIsNone(web_search_requirement_failure("examine", {"type": "shell", "require_web_search": True}, unsearched))
+
+    def test_research_limitation_with_pass_verdict_fails_closed(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import load_config, validate_stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "examine.md"
+            queries = "\n".join(f"- query {i}" for i in range(8))
+            path.write_text(
+                "# 특허성 심사 보고서\n"
+                "## 검색 범위 및 한계\nRESEARCH_LIMITATION: 검색 불가\n"
+                "## 배터리 산업 SW 직접 결속 판단\nok\n"
+                "## 선행기술 후보\nA\n"
+                f"## 검색 쿼리 로그\n{queries}\n"
+                "## 하네스 형식/필드 바인딩 점검\nok\n"
+                "## 독립항 1 구성요소별 선행기술 매핑\nok\n"
+                "## 심사관 A 판단\nok\n## 심사관 B 판단\nok\n"
+                "## 신규성 판단\nok\n## 진보성 판단\nok\n"
+                "## KSR/예측 가능한 조합 점검\nok\n"
+                "## 명확성/기재요건 판단\nok\n"
+                "## 외부 신규 심사관 리스크\nok\n"
+                "## 심사 점수표\n신규성: A-\n진보성: A-\n명세서 뒷받침/명확성: A-\n권리범위 방어력: A-\n"
+                "## 보정 지시\n없음\n## 최종 판정\nFINAL_VERDICT: DIRECT_OK\n",
+                encoding="utf-8",
+            )
+            ok, failures = validate_stage("examine", path, load_config())
+            self.assertFalse(ok)
+            self.assertTrue(any("RESEARCH_LIMITATION" in f for f in failures), failures)
+
+    def test_codex_usage_skips_malformed_session_lines(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import codex_usage_from_sessions
+
+        with tempfile.TemporaryDirectory() as tmp:
+            sess = Path(tmp) / "s.jsonl"
+            sess.write_text(
+                '[1,2,3]\n'
+                '"scalar"\n'
+                '{"payload":{"type":"token_count","rate_limits":{"secondary":{"window_minutes":"oops","used_percent":50}}}}\n',
+                encoding="utf-8",
+            )
+            self.assertIsNone(codex_usage_from_sessions({"session_glob": str(sess)}))
+
+    def test_version_flag(self) -> None:
+        result = run_cli(["--version"], REPO_ROOT)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertIn("patent-loop-harness", result.stdout)
+
+    def test_custom_field_is_not_battery_profile_via_word_boundary(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        import tomllib
+
+        from patent_loop_harness.cli import field_profile, is_battery_profile_text
+
+        # ordinary words ("process"/"inspection") must NOT trigger battery via the "ess" substring
+        self.assertFalse(is_battery_profile_text("Semiconductor package inspection and process control gates"))
+        self.assertTrue(is_battery_profile_text("battery-industry software for BMS and ESS"))
+        # the shipped semiconductor example config must resolve as a non-battery profile
+        example = tomllib.loads((REPO_ROOT / "examples" / "patent_loop.example.toml").read_text(encoding="utf-8"))
+        profile = field_profile(example)
+        self.assertFalse(profile["battery_default"], profile["scope_terms"][:5])
+        self.assertNotIn("bms", [t.lower() for t in profile["scope_terms"]])
 
 
 if __name__ == "__main__":

@@ -9,6 +9,72 @@ workbench data such as invention notes, backlog state, generated drafts,
 verification reports, visuals, logs, and patent history should live in a
 separate private repository.
 
+## What this is (and isn't)
+
+This harness selects patent *ideas* and drafts patent specifications for a target
+field. It is a **drafting and prior-art-stress-test aid with a human in the loop**,
+not a filing tool.
+
+- Outputs are **AI-generated drafts**. A human — and a qualified patent attorney
+  (변리사) — must review, correct, and substantively rework them before any use.
+  **Do not file the output as-is.**
+- `DIRECT_OK`, the `finalized` status, and the "최종본 / final candidate" labels mean
+  a draft **passed the harness's internal self-checks**. They are **not** a grant
+  prediction and **not** a signal that the draft is ready to file.
+- **Live web search is mandatory and enforced (fail-closed).** The prior-art /
+  examiner / red-team / external-spot-check stages must perform real web search.
+  The harness enables it by default and **verifies it actually happened**; if no
+  `web_search` activity is detected for one of those stages, the stage fails closed
+  (the item is blocked) instead of advancing on possibly-unsearched analysis.
+  - **Codex** is invoked with `--search` (the native live `web_search` tool). On by
+    default; it prints a `web search: <query>` line per call, which the harness uses
+    as proof of search.
+  - **Claude Code** is invoked with `--allowedTools WebSearch,WebFetch` and defaults
+    to `output_format = "json"` so the harness can read the actual web-search count
+    from the result envelope (`usage.server_tool_use.web_search_requests` and
+    `modelUsage[...].webSearchRequests`). Plain `text` output cannot prove a tool
+    call, so with `output_format = "text"` search-required stages fail closed.
+    WebSearch availability is provider-gated (Anthropic API / Vertex Claude 4 /
+    Foundry; not Bedrock).
+  - **`prompt_only`** and **`shell`** are not subject to this enforcement.
+
+  Set `[runner].require_web_search = false` only if you knowingly want to disable
+  this safety gate, and per-runner `web_search = false` to drop the search flags.
+  Run `patent-loop doctor --runner-smoke` to confirm live web search works
+  end-to-end. The harness still does **not** verify that cited references actually
+  resolve, so re-check prior art with a human and counsel before relying on it.
+- **Inventorship.** An AI cannot be a named inventor (Thaler v. Vidal; the DABUS
+  decisions at KIPO/EPO/UK and elsewhere). A natural person must make a significant
+  intellectual contribution to the conception of each claim — editorial polishing of
+  an AI-drafted claim is not, by itself, an inventive contribution. Confirm valid
+  human inventorship before filing.
+
+This software provides **no legal or patent advice** and is not a substitute for a
+licensed patent attorney (변리사). Generated specifications and the technical-overview
+HTML may describe an unfiled invention; do not disclose them publicly before making a
+filing/priority decision with counsel, because pre-filing disclosure can destroy
+novelty (notably in the EPO's absolute-novelty regime).
+
+## Limitations and responsible use
+
+- **Validation is structural, not substantive.** `validate_stage` checks section
+  presence, counts, a regex-extracted grade, and the `FINAL_VERDICT` / `GO_DECISION`
+  token. It is a format/lint layer; passing it is not a patentability judgment.
+- **Evaluation stages share one model.** The writer, examiner, red-team, verifier,
+  and spot-check all use the same configured `[runner]` model. Despite the
+  `context_free` / `independent` / `external` stage names, they are the same model
+  re-applying the standard from a fresh prompt — not an independent second opinion.
+  For a genuine cross-check, point those stages at a different model/provider, or
+  review with a human.
+- **Output is Korean / KIPO-oriented.** The prompts and the validator's required
+  section headings are Korean. `--field` retargets the *subject*, not the output
+  language; non-Korean output will not pass validation as shipped.
+- **No completeness guarantee.** Web search is enforced (above), but the harness does
+  not verify that cited references resolve or that the search was exhaustive. Treat
+  results as leads for a human/counsel prior-art search.
+
+See `USAGE_POLICY.md` for intended use and explicit non-goals.
+
 ## Install
 
 ```bash
@@ -66,7 +132,7 @@ model = "sonnet"
 
 [runner.claude]
 permission_mode = "acceptEdits"
-output_format = "text"
+output_format = "json"   # default; required so web search can be verified (fail-closed otherwise)
 ```
 
 Or override it for one invocation:

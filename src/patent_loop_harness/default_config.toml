@@ -28,6 +28,22 @@ heartbeat_min_interval_minutes = 45
 [field]
 name = "battery-industry software"
 description = "Battery-industry software tied directly to BMS, ESS, PCS, pack/cell/module, charger, SOH/SOC/SOP, battery logs/data, cloud, digital-twin, simulator, or verification boundaries."
+domains = [
+  "ESS",
+  "vehicle battery BMS",
+  "battery software communication",
+  "battery software security",
+  "battery software logs",
+  "battery software data",
+  "battery software life and SOH",
+  "battery software algorithm",
+  "battery software control",
+  "ESS cloud",
+  "ESS digital twin",
+  "battery software simulator",
+  "battery software verification",
+  "battery software architecture"
+]
 binding_label = "배터리 산업 SW 직접 결속"
 micro_boundary_label = "배터리 SW micro-boundary"
 micro_boundary_column = "battery SW micro-boundary"
@@ -83,11 +99,12 @@ high_risk_terms = [
 [runner]
 type = "codex"
 enabled = true
-timeout_seconds = 1200
+timeout_seconds = 2400
 model = ""
 capacity_retry_seconds = 300
 capacity_retry_max_attempts = 3
 repair_attempts = 1
+require_web_search = true
 ignore_user_config = true
 ephemeral = true
 bypass_hook_trust = false
@@ -107,6 +124,7 @@ env_allowlist = [
 
 [runner.codex]
 command = "codex"
+web_search = true
 sandbox = "workspace-write"
 approval_policy = "never"
 ignore_user_config = true
@@ -115,7 +133,8 @@ bypass_hook_trust = false
 
 [runner.claude]
 command = "claude"
-output_format = "text"
+web_search = true
+output_format = "json"
 query = "Execute the task described in stdin."
 bare = false
 no_session_persistence = true

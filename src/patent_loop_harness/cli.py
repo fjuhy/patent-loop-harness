@@ -4,10 +4,8 @@ from __future__ import annotations
 import argparse
 import datetime as dt
 import glob
-from importlib import resources
 import json
 import os
-from pathlib import Path
 import re
 import shlex
 import shutil
@@ -15,6 +13,8 @@ import subprocess
 import sys
 import time
 import traceback
+from importlib import resources
+from pathlib import Path
 from typing import Any
 
 try:
@@ -34,6 +34,10 @@ HEARTBEAT_STATE_PATH = ROOT / "state" / "heartbeat-state.json"
 LOCK_PATH = ROOT / "state" / "loop.lock"
 METRICS_PATH = ROOT / "logs" / "metrics.jsonl"
 PACKAGE = "patent_loop_harness"
+try:
+    from patent_loop_harness import __version__ as PACKAGE_VERSION
+except Exception:  # pragma: no cover
+    PACKAGE_VERSION = "0.0.0"
 DEFAULT_RUNNER_ENV_ALLOWLIST = [
     "PATH",
     "HOME",
@@ -51,6 +55,7 @@ RUNNER_TYPES = {"codex", "claude", "shell", "prompt_only"}
 RUNNER_PROVIDER_KEYS = RUNNER_TYPES
 
 TERMINAL_STATUSES = {"finalized", "finalized_out_of_scope", "rejected", "blocked"}
+SEARCH_REQUIRED_STAGES = {"research", "examine", "redteam", "external_spotcheck"}
 PROMPTS = {
     "idea": "10_idea_scout.md",
     "research": "15_prior_art_gate.md",
@@ -108,13 +113,31 @@ def read_prompt(name: str) -> str:
     return bundled_text(f"prompts/{name}")
 
 
+def deep_merge(base: dict[str, Any], override: dict[str, Any]) -> dict[str, Any]:
+    merged = dict(base)
+    for key, value in override.items():
+        if isinstance(value, dict) and isinstance(merged.get(key), dict):
+            merged[key] = deep_merge(merged[key], value)
+        else:
+            merged[key] = value
+    return merged
+
+
 def load_config() -> dict[str, Any]:
     if tomllib is None:
         raise RuntimeError("Python 3.11+ is required for tomllib TOML parsing.")
-    if CONFIG_PATH.exists():
-        with CONFIG_PATH.open("rb") as handle:
-            return tomllib.load(handle)
-    return tomllib.loads(bundled_text("default_config.toml"))
+    defaults = tomllib.loads(bundled_text("default_config.toml"))
+    if not CONFIG_PATH.exists():
+        return defaults
+    with CONFIG_PATH.open("rb") as handle:
+        user_config = tomllib.load(handle)
+    merged = deep_merge(defaults, user_config)
+    # The [field] table is a cohesive profile: a partial user [field] (e.g. just a
+    # custom name) must NOT inherit the bundled battery scope_terms/high_risk_terms,
+    # so replace it wholesale rather than merging it.
+    if isinstance(user_config.get("field"), dict):
+        merged["field"] = user_config["field"]
+    return merged
 
 
 def load_json(path: Path, default: Any) -> Any:
@@ -123,6 +146,7 @@ def load_json(path: Path, default: Any) -> Any:
     except FileNotFoundError:
         return default
     except json.JSONDecodeError:
+        print(f"WARNING: ignoring corrupt JSON at {path}; using default", file=sys.stderr)
         return default
 
 
@@ -197,7 +221,10 @@ class LoopLock:
             if age < self.stale_seconds and pid is None:
                 raise RuntimeError(f"Loop lock is present and not stale yet: {self.path}")
             self.path.unlink()
-        fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        try:
+            fd = os.open(str(self.path), os.O_CREAT | os.O_EXCL | os.O_WRONLY)
+        except FileExistsError:
+            raise RuntimeError(f"Loop already running: {self.path}") from None
         with os.fdopen(fd, "w", encoding="utf-8") as handle:
             handle.write(json.dumps({"pid": os.getpid(), "created_at": now()}, ensure_ascii=False))
         self.acquired = True
@@ -374,6 +401,8 @@ def codex_usage_from_sessions(guard_cfg: dict[str, Any]) -> dict[str, Any] | Non
                 record = json.loads(line)
             except json.JSONDecodeError:
                 continue
+            if not isinstance(record, dict):
+                continue
             payload = record.get("payload")
             if not isinstance(payload, dict) or payload.get("type") != "token_count":
                 continue
@@ -383,7 +412,11 @@ def codex_usage_from_sessions(guard_cfg: dict[str, Any]) -> dict[str, Any] | Non
             secondary = rate_limits.get("secondary")
             if not isinstance(secondary, dict):
                 continue
-            if int(secondary.get("window_minutes", 0)) != weekly_window:
+            try:
+                window_minutes = int(secondary.get("window_minutes", 0))
+            except (TypeError, ValueError):
+                continue
+            if window_minutes != weekly_window:
                 continue
             percent = parse_percent(secondary.get("used_percent"))
             if percent is None:
@@ -486,7 +519,13 @@ def usage_guard_for_item(item: dict[str, Any], config: dict[str, Any]) -> dict[s
 
 
 def count_claims(text: str) -> int:
-    claims_text = section_text(text, "청구범위") or text
+    match = re.search(r"^##[ \t]+(?:\d+\.\s*)?청구범위\b.*$", text, flags=re.MULTILINE)
+    if match:
+        rest = text[match.end():]
+        nxt = re.search(r"^##[ \t]+", rest, flags=re.MULTILINE)
+        claims_text = rest[: nxt.start()] if nxt else rest
+    else:
+        claims_text = section_text(text, "청구범위") or text
     patterns = [
         r"^\s*(?:[-*]\s*)?청구항\s*\d+\b",
         r"^\s*\d+\.\s+.*?청구",
@@ -820,21 +859,27 @@ def runner_profile(config: dict[str, Any]) -> dict[str, Any]:
         merged = {**legacy_common, **merged}
     merged["type"] = runner_type
     merged.setdefault("enabled", True)
-    merged.setdefault("timeout_seconds", 1200)
+    merged.setdefault("timeout_seconds", 2400)
     merged.setdefault("capacity_retry_seconds", 300)
     merged.setdefault("capacity_retry_max_attempts", 3)
     merged.setdefault("repair_attempts", 1)
+    merged.setdefault("web_search", True)
+    merged.setdefault("require_web_search", True)
     return merged
 
 
 def is_battery_profile_text(text: str) -> bool:
     lowered = text.casefold()
-    return any(term in lowered for term in ["battery", "bms", "ess", "배터리", "전지", "pcs"])
+    if "배터리" in lowered or "전지" in lowered:
+        return True
+    # Word-boundary match so ordinary words (e.g. "process", "inspection") do not
+    # falsely trigger the battery profile via substrings like "ess".
+    return bool(re.search(r"(?<![a-z])(?:battery|bms|ess|pcs)(?![a-z])", lowered))
 
 
 def field_profile(config: dict[str, Any]) -> dict[str, Any]:
     field_cfg = config.get("field", {})
-    domains = listify(field_cfg.get("domains")) or listify(config.get("loop", {}).get("domains"))
+    domains = listify(field_cfg.get("domains"))
     name = str(field_cfg.get("name") or DEFAULT_FIELD_NAME).strip()
     description = str(field_cfg.get("description") or DEFAULT_FIELD_DESCRIPTION).strip()
     configured_scope_terms = listify(field_cfg.get("scope_terms"))
@@ -898,7 +943,10 @@ def field_column_options(field: dict[str, Any], key: str) -> list[str]:
 
 
 def has_any_heading(text: str, headings: list[str]) -> bool:
-    return any(re.search(rf"^##\s+{re.escape(heading)}\s*$", text, flags=re.MULTILINE) for heading in headings)
+    return any(
+        re.search(rf"^##[ \t]+{re.escape(heading)}(?:[ \t].*)?$", text, flags=re.MULTILINE)
+        for heading in headings
+    )
 
 
 def has_any_term(text: str, terms: list[str]) -> bool:
@@ -1320,6 +1368,7 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
         min_claims = int(config["loop"].get("min_claims_for_final", 18))
         required = [
             "# 최종 특허 명세서 후보",
+            "## 출원 전 주의",
             "## 문맥 독립 요약",
             "## 최종 전략 메모",
             "## 가장 가까운 선행기술 대비표",
@@ -1394,10 +1443,7 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
         forbidden = [
             "선행기술",
             "하네스",
-            "루프",
             "레드팀",
-            "LLM",
-            "AI가 작성",
             "청구항",
             "특허성 조사",
             "DIRECT_OK",
@@ -1409,12 +1455,19 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
     else:
         failures.append(f"unknown stage: {stage}")
 
+    if stage in SEARCH_REQUIRED_STAGES and "RESEARCH_LIMITATION" in text:
+        if "FINAL_VERDICT: DIRECT_OK" in text or "GO_DECISION: PROCEED_NARROW" in text:
+            failures.append(
+                "RESEARCH_LIMITATION present but stage reached a pass verdict; a real prior-art "
+                "search is required to pass (fail-closed)"
+            )
+
     return not failures, failures
 
 
 def section_text(text: str, heading: str) -> str:
     normalized = heading.replace("## ", "")
-    pattern = re.compile(rf"^##\s+{re.escape(normalized)}\s*$", re.MULTILINE)
+    pattern = re.compile(rf"^##[ \t]+{re.escape(normalized)}(?:[ \t].*)?$", re.MULTILINE)
     match = pattern.search(text)
     if not match:
         return ""
@@ -1462,6 +1515,43 @@ def is_capacity_error(result: subprocess.CompletedProcess[str]) -> bool:
         "rate limit",
     ]
     return any(term in combined for term in retry_terms)
+
+
+def web_search_evidence(runner_type: str, stdout: str, stderr: str) -> bool:
+    combined = f"{stdout}\n{stderr}"
+    if runner_type == "codex":
+        # codex prints a line-anchored `web search: <query>` per live web_search tool call
+        return bool(re.search(r"(?im)^\s*web[ _]search\b", combined))
+    if runner_type == "claude":
+        # plain text output cannot prove a tool call; the json envelope reports the
+        # actual search count. Require a NON-ZERO count (the usage keys are present
+        # even when zero searches happened), or an explicit tool-result block.
+        return bool(re.search(r"\"(?:web_search_requests|webSearchRequests)\"\s*:\s*[1-9]", combined)) or (
+            "web_search_tool_result" in combined
+        )
+    return True
+
+
+def web_search_requirement_failure(
+    stage: str, runner_cfg: dict[str, Any], result: subprocess.CompletedProcess[str]
+) -> str | None:
+    if not bool(runner_cfg.get("require_web_search", True)):
+        return None
+    runner_type = str(runner_cfg.get("type", ""))
+    if runner_type not in {"codex", "claude"} or stage not in SEARCH_REQUIRED_STAGES:
+        return None
+    if web_search_evidence(runner_type, result.stdout or "", result.stderr or ""):
+        return None
+    hint = (
+        "--search"
+        if runner_type == "codex"
+        else "--allowedTools WebSearch,WebFetch with output_format=json so the search count is visible"
+    )
+    return (
+        f"web search is required for stage '{stage}' but no live web_search activity was "
+        f"detected in the {runner_type} runner output; enable web search ({hint}) — the loop "
+        "fails closed rather than trust unsearched prior-art analysis"
+    )
 
 
 def artifact_context(item: dict[str, Any], stage: str) -> str:
@@ -1687,8 +1777,8 @@ def output_path_for(item: dict[str, Any], stage: str) -> Path:
 def build_prompt(item: dict[str, Any], stage: str, output_path: Path, config: dict[str, Any], repair_notes: list[str] | None = None) -> str:
     shared = read_prompt("00_shared_rules.md")
     role = read_prompt(PROMPTS[stage])
-    guardrails = read_text(GUARDRAILS_PATH)
-    evaluation_lessons = read_text(ROOT / "state" / "evaluation_lessons.md")
+    guardrails = read_text(GUARDRAILS_PATH)[-8000:]
+    evaluation_lessons = read_text(ROOT / "state" / "evaluation_lessons.md")[-8000:]
     context = artifact_context(item, stage)
     duplicate_context = duplicate_avoidance_context(item, stage)
     ideation_context = seed_ideation_context(stage)
@@ -1776,10 +1866,18 @@ def build_codex_command(runner_cfg: dict[str, Any], last_message: Path) -> list[
     if bool(runner_cfg.get("ephemeral", True)):
         command.insert(2, "--ephemeral")
     if bool(runner_cfg.get("bypass_hook_trust", False)):
+        print(
+            "WARNING: codex --dangerously-bypass-hook-trust is enabled; this disables codex's "
+            "hook-trust safety gate. Keep it off unless you understand the risk.",
+            file=sys.stderr,
+        )
         command.insert(2, "--dangerously-bypass-hook-trust")
     model = str(runner_cfg.get("model", "")).strip()
     if model:
         command[2:2] = ["--model", model]
+    if bool(runner_cfg.get("web_search", True)):
+        # --search is a top-level codex flag and must precede the `exec` subcommand
+        command.insert(1, "--search")
     return command
 
 
@@ -1804,6 +1902,8 @@ def build_claude_command(runner_cfg: dict[str, Any]) -> list[str]:
     max_budget_usd = float(runner_cfg.get("max_budget_usd", 0) or 0)
     if max_budget_usd > 0:
         command.extend(["--max-budget-usd", str(max_budget_usd)])
+    if bool(runner_cfg.get("web_search", True)):
+        command.extend(["--allowedTools", "WebSearch,WebFetch"])
     command.extend(runner_argv(runner_cfg.get("extra_args")))
     query = str(runner_cfg.get("query", "Execute the task described in stdin.")).strip()
     command.extend(["-p", query])
@@ -1882,15 +1982,22 @@ def run_agent(prompt: str, output_path: Path, config: dict[str, Any], stage: str
     while True:
         attempt += 1
         started = time.time()
-        result = subprocess.run(
-            command,
-            input=prompt,
-            text=True,
-            capture_output=True,
-            timeout=int(runner_cfg.get("timeout_seconds", 3600)),
-            cwd=str(ROOT),
-            env=runner_child_env(runner_cfg),
-        )
+        try:
+            result = subprocess.run(
+                command,
+                input=prompt,
+                text=True,
+                capture_output=True,
+                timeout=int(runner_cfg.get("timeout_seconds", 3600)),
+                cwd=str(ROOT),
+                env=runner_child_env(runner_cfg),
+            )
+        except subprocess.TimeoutExpired as exc:
+            timeout_stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
+            timeout_stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")
+            result = subprocess.CompletedProcess(
+                command, 124, timeout_stdout, f"{timeout_stderr}\n[runner timed out after {exc.timeout}s]"
+            )
         duration = round(time.time() - started, 3)
         write_text(stdout_log, result.stdout)
         write_text(stderr_log, result.stderr)
@@ -1904,6 +2011,7 @@ def run_agent(prompt: str, output_path: Path, config: dict[str, Any], stage: str
                 "at": now(),
                 "event": "runner_exec",
                 "runner": runner_type,
+                "model": model or "default",
                 "item_id": item_id,
                 "stage": stage,
                 "returncode": result.returncode,
@@ -2102,10 +2210,25 @@ def run_one(item: dict[str, Any], config: dict[str, Any], dry_run: bool = False,
         if result.returncode != 0:
             failures = [f"{runner_type} runner returned {result.returncode}"]
         else:
-            ok, failures = validate_stage(stage, output_path, config, item=item)
-            if ok:
-                update_item_after_success(item, stage, output_path, config=config)
-                return {"ran": True, "stage": stage, "item_id": item["id"], "output_path": output_path, "status": item["status"]}
+            search_failure = web_search_requirement_failure(stage, runner_cfg, result)
+            if search_failure:
+                failures = [search_failure]
+                append_jsonl(
+                    METRICS_PATH,
+                    {
+                        "at": now(),
+                        "event": "web_search_missing",
+                        "runner": runner_type,
+                        "item_id": item["id"],
+                        "stage": stage,
+                        "attempt": attempt + 1,
+                    },
+                )
+            else:
+                ok, failures = validate_stage(stage, output_path, config, item=item)
+                if ok:
+                    update_item_after_success(item, stage, output_path, config=config)
+                    return {"ran": True, "stage": stage, "item_id": item["id"], "output_path": output_path, "status": item["status"]}
 
     record_guardrail(stage, item, failures)
     item["status"] = "blocked"
@@ -2155,7 +2278,7 @@ def cmd_seed(args: argparse.Namespace) -> int:
                 "at": now(),
                 "stage": "seed",
                 "field": field["name"],
-                "source": "patent_loop.py seed command",
+                "source": "patent-loop seed command",
             }
         ],
     }
@@ -2226,7 +2349,14 @@ def cmd_run(args: argparse.Namespace) -> int:
                 if guard_result:
                     results.append(guard_result)
                     break
-            result = run_one(item, config, dry_run=args.dry_run, no_runner=args.no_runner)
+            try:
+                result = run_one(item, config, dry_run=args.dry_run, no_runner=args.no_runner)
+            except RuntimeError as exc:
+                note_stage = stage_for(item) or "unknown"
+                item["status"] = "blocked"
+                item["updated_at"] = now()
+                item.setdefault("notes", []).append({"at": now(), "stage": note_stage, "error": str(exc)})
+                result = {"ran": False, "item_id": item.get("id"), "status": "blocked", "error": str(exc)}
             results.append(result)
             if result.get("dry_run"):
                 break
@@ -2370,8 +2500,15 @@ def runner_smoke_check(config: dict[str, Any], runner_cfg: dict[str, Any]) -> st
     runner_type = str(runner_cfg["type"])
     if runner_type == "prompt_only":
         return None
+    require_search = bool(runner_cfg.get("require_web_search", True)) and runner_type in {"codex", "claude"}
     output_path = ROOT / "state" / f"runner-smoke-{runner_type}-{slug_time()}.txt"
-    prompt = f"Write exactly RUNNER_SMOKE_OK, with no newline, to this file path: {output_path}\n"
+    if require_search:
+        prompt = (
+            "Perform exactly one live web search to confirm web access is working, then "
+            f"write exactly RUNNER_SMOKE_OK, with no newline, to this file path: {output_path}\n"
+        )
+    else:
+        prompt = f"Write exactly RUNNER_SMOKE_OK, with no newline, to this file path: {output_path}\n"
     try:
         result = run_agent(prompt, output_path, config, "doctor_smoke", f"{runner_type}-smoke")
     except Exception as exc:  # noqa: BLE001
@@ -2386,6 +2523,13 @@ def runner_smoke_check(config: dict[str, Any], runner_cfg: dict[str, Any]) -> st
         return f"{runner_type} smoke check did not write output: {exc}"
     if text != "RUNNER_SMOKE_OK":
         return f"{runner_type} smoke check wrote unexpected output: {text[:120]!r}"
+    if require_search and not web_search_evidence(runner_type, result.stdout or "", result.stderr or ""):
+        return (
+            f"{runner_type} smoke check could not confirm live web search; web search is "
+            "required by default. Enable it (codex: --search / claude: --allowedTools "
+            "WebSearch,WebFetch with a tool-use-visible output_format) or set "
+            "[runner].require_web_search = false to override."
+        )
     try:
         output_path.unlink()
     except OSError:
@@ -2445,6 +2589,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Autonomous patent generation loop harness")
+    parser.add_argument("--version", action="version", version=f"patent-loop-harness {PACKAGE_VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
 
     seed = sub.add_parser("seed", help="Append a seed backlog item")
