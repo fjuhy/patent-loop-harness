@@ -606,6 +606,120 @@ FINAL_VERDICT: MAYBE
         # all A- still passes
         self.assertEqual(grade_failures(doc("A-", "A-", "A-", "A-"), cfg), [])
 
+    @staticmethod
+    def _valid_visual_html() -> str:
+        sections = [
+            "기술 분야",
+            "배경 기술",
+            "기존 기술의 문제점",
+            "발명의 목적",
+            "발명의 핵심 구성",
+            "전체 시스템 구성",
+            "구성요소별 상세 설명",
+            "동작 절차",
+            "판단식 및 변수 설명",
+            "데이터 구조",
+            "결과 반영 방식",
+            "도면 설명",
+            "상세 실시예",
+            "예외 실시예 및 실패 처리",
+            "복구 및 정상 복귀 절차",
+            "기존 기술과의 구분점",
+            "기대 효과",
+            "변형예 및 구현 고려사항",
+        ]
+        body = "".join(f"<section><h2>{heading}</h2><p>입력과 판단 결과를 기술한다.</p></section>" for heading in sections)
+        svgs = "".join(
+            f'<svg viewBox="0 0 200 80"><rect x="5" y="5" width="190" height="70" fill="#fff" stroke="#17365d"/><text x="20" y="45" fill="#111">도식 {index}</text></svg>'
+            for index in range(1, 4)
+        )
+        tables = "".join(
+            "<table><tr><th>항목</th><th>설명</th></tr><tr><td>입력</td><td>원문 값</td></tr></table>" for _ in range(2)
+        )
+        return (
+            '<!doctype html><html lang="ko"><head><meta charset="utf-8">'
+            '<meta name="viewport" content="width=device-width,initial-scale=1">'
+            '<title>시험 발명</title><style>@media print{section{break-inside:avoid}} body{color:#111}</style>'
+            f"</head><body><h1>시험 발명</h1>{body}{tables}{svgs}</body></html>"
+        )
+
+    def test_visual_artifact_contract_accepts_complete_source_faithful_html(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import visual_artifact_failures
+
+        cfg = {
+            "quality": {
+                "min_visual_html_chars": 1000,
+                "min_visual_svg_count": 3,
+                "min_visual_section_count": 16,
+                "min_visual_table_count": 2,
+            }
+        }
+        self.assertEqual(visual_artifact_failures(self._valid_visual_html(), cfg), [])
+
+    def test_visual_artifact_contract_rejects_meta_placeholders_and_broken_style(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import visual_artifact_failures
+
+        broken = self._valid_visual_html().replace(
+            "</body>",
+            "<p>한 문장 요약입니다.</p>@@B잠금0@@<script>bad()</script></body>",
+        )
+        cfg = {"quality": {"min_visual_html_chars": 1000, "min_visual_svg_count": 3, "min_visual_section_count": 16, "min_visual_table_count": 2}}
+        failures = visual_artifact_failures(broken, cfg)
+        self.assertTrue(any("한 문장 요약" in failure for failure in failures), failures)
+        self.assertTrue(any("합니다" in failure or "입니다" in failure for failure in failures), failures)
+        self.assertTrue(any("placeholder" in failure or "corruption" in failure for failure in failures), failures)
+        self.assertIn("visual artifact must not contain JavaScript", failures)
+
+    def test_visual_html_requires_independent_review_before_finalized(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        import patent_loop_harness.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_root = cli.ROOT
+            try:
+                cli.ROOT = Path(tmp)
+                html_path = Path(tmp) / "visuals" / "item.html"
+                html_path.parent.mkdir()
+                html_path.write_text(self._valid_visual_html(), encoding="utf-8")
+                item = {"id": "visual-review-001", "status": "visualization_ready"}
+                cli.update_item_after_success(item, "visualize", html_path, config={"loop": {}})
+                self.assertEqual(item["status"], "visual_review_ready")
+                self.assertEqual(cli.stage_for(item), "visual_review")
+
+                reject_path = Path(tmp) / "reports" / "review-reject.md"
+                reject_path.parent.mkdir()
+                reject_path.write_text("FINAL_VERDICT: REJECT\n", encoding="utf-8")
+                cli.update_item_after_success(item, "visual_review", reject_path, config={"loop": {}})
+                self.assertEqual(item["status"], "visual_revision_needed")
+                self.assertEqual(item["visual_iteration"], 1)
+                self.assertEqual(cli.stage_for(item), "visual_revise")
+
+                revised_path = Path(tmp) / "visuals" / "item-revised.html"
+                revised_path.write_text(self._valid_visual_html(), encoding="utf-8")
+                cli.update_item_after_success(item, "visual_revise", revised_path, config={"loop": {}})
+                self.assertEqual(item["status"], "visual_review_ready")
+
+                pass_path = Path(tmp) / "reports" / "review-pass.md"
+                pass_path.write_text("FINAL_VERDICT: DIRECT_OK\n", encoding="utf-8")
+                cli.update_item_after_success(item, "visual_review", pass_path, config={"loop": {}})
+                self.assertEqual(item["status"], "finalized")
+                self.assertIsNone(cli.stage_for(item))
+            finally:
+                cli.ROOT = old_root
+
+    def test_visual_review_validation_requires_implementation_sections(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import validate_stage
+
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "review.md"
+            path.write_text("# 기술문서 구현 가능성 검토 보고서\nFINAL_VERDICT: DIRECT_OK\n", encoding="utf-8")
+            ok, failures = validate_stage("visual_review", path, {"quality": {}})
+            self.assertFalse(ok)
+            self.assertTrue(any("구성요소별 구현 가능성" in failure for failure in failures), failures)
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -190,6 +190,32 @@ patent-loop run \
   --max-items 1
 ```
 
+## Final HTML Deliverable
+
+A successful item does not stop at the Markdown specification. After independent
+verification and the external prior-art spot check, the harness now produces one
+standalone HTML technical document under `visuals/`, then runs an independent
+implementation-readiness review of that HTML.
+
+The item reaches `finalized` only after the HTML review returns `DIRECT_OK`.
+A rejected HTML enters a bounded `visual_revise -> visual_review` loop; it is
+blocked after `max_visual_revision_cycles` rather than silently shipping an
+incomplete document.
+
+The HTML contract is intentionally strict:
+
+- one individual-invention file, with inline CSS and at least three inline SVG diagrams;
+- source-faithful use of the final specification plus the source draft — no unsupported
+  mechanisms, formulas, thresholds, fields, control effects, or example values;
+- Korean technical-document `한다체`, industry-standard Korean terminology, and no
+  one-sentence-summary/reviewer-request/generation-process metadata sections;
+- implementation-level explanation of inputs, sources, measurement/generation,
+  calculations, thresholds, pass/fail behavior, result hooks, records, examples, and recovery;
+- no JavaScript, external assets, unresolved placeholders, or mechanical-replacement corruption.
+
+The reader-facing HTML remains an internal draft unless and until filing/public-disclosure
+risk has been reviewed with counsel.
+
 ## Examiner Calibration
 
 The harness tries to approximate real patent examination rather than maximize

@@ -11,4 +11,6 @@
 - `50_finalizer.md`: 최종 출원 후보 정리
 - `60_independent_verifier.md`: 산출물 독립 검증
 - `65_external_prior_art_spotcheck.md`: 최종본 통과 후 외부 선행기술 보수 감사
-- `70_visual_explainer.md`: 공개용 기술 설명 HTML 생성
+- `70_visual_explainer.md`: 원문 충실 개별 발명안 HTML 기술문서 생성
+- `75_technical_document_reviewer.md`: HTML의 원문 충실성·구현 가능성 독립 검토
+- `80_visual_reviser.md`: 검토 거절 사유를 원문 범위 안에서 보정

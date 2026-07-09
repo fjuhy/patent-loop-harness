@@ -89,7 +89,9 @@ patent-loop run \
 - `status` shows the active root, field, runner, backlog counts, usage guard, and next runnable item.
 - `run --dry-run` writes `task_prompt.md` and prints `prompt_path` plus `output_path`; inspect those files when debugging prompt construction.
 - A live run updates `state/backlog.jsonl`, `state/status.json`, `logs/metrics.jsonl`, and a stage artifact under `work/`, `final/`, `reports/`, or `visuals/`.
-- `blocked` means the harness could not validate the generated artifact after allowed repair attempts. Inspect the artifact, runner logs, and appended guardrail note.
+- The reader-facing deliverable is one standalone, source-faithful HTML file under `visuals/`. `visual_review_ready` means the HTML awaits an independent implementation-readiness review; `visual_revision_needed` means the next stage will revise that same individual document from the review findings.
+- `finalized` is reached only after the HTML reviewer returns `DIRECT_OK`. Do not hand off an item merely because the Markdown specification or the first HTML draft exists.
+- `blocked` means the harness could not validate the generated artifact after allowed repair attempts, or the bounded HTML review/revision loop was exhausted. Inspect the artifact, runner logs, reviewer report, and appended guardrail note.
 - `rejected` can be an expected high-confidence outcome, especially after prior-art or red-team gates.
 
 ## Public/Private Boundary

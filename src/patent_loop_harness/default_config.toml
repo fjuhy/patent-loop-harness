@@ -19,6 +19,7 @@ domains = [
 max_revision_cycles = 5
 redteam_reject_terminal_after_iteration = 5
 max_research_attempts = 3
+max_visual_revision_cycles = 3
 max_items_per_run = 1
 min_claims_for_draft = 12
 min_claims_for_final = 18
@@ -178,6 +179,10 @@ min_grade_for_pass = "B+"
 min_grade_inventive_step = "B+"
 min_grade_any_axis = "B"
 forbid_conditional_pass = false
+min_visual_html_chars = 24000
+min_visual_svg_count = 3
+min_visual_section_count = 16
+min_visual_table_count = 2
 
 [paths]
 archive = ""

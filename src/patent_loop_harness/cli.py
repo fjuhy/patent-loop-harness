@@ -13,6 +13,7 @@ import subprocess
 import sys
 import time
 import traceback
+from html.parser import HTMLParser
 from importlib import resources
 from pathlib import Path
 from typing import Any
@@ -67,6 +68,8 @@ PROMPTS = {
     "verify": "60_independent_verifier.md",
     "external_spotcheck": "65_external_prior_art_spotcheck.md",
     "visualize": "70_visual_explainer.md",
+    "visual_review": "75_technical_document_reviewer.md",
+    "visual_revise": "80_visual_reviser.md",
 }
 
 
@@ -262,6 +265,10 @@ def stage_for(item: dict[str, Any]) -> str | None:
         return "external_spotcheck"
     if status == "visualization_ready":
         return "visualize"
+    if status == "visual_review_ready":
+        return "visual_review"
+    if status == "visual_revision_needed":
+        return "visual_revise"
     return None
 
 
@@ -1259,6 +1266,157 @@ def idea_screening_failures(text: str, field: dict[str, Any]) -> list[str]:
     return failures
 
 
+class VisibleHTMLTextParser(HTMLParser):
+    """Extract reader-visible text while excluding CSS, scripts, and templates."""
+
+    IGNORED_TAGS = {"style", "script", "template"}
+
+    def __init__(self) -> None:
+        super().__init__(convert_charrefs=True)
+        self.ignored_depth = 0
+        self.parts: list[str] = []
+
+    def handle_starttag(self, tag: str, attrs: list[tuple[str, str | None]]) -> None:
+        if tag.casefold() in self.IGNORED_TAGS:
+            self.ignored_depth += 1
+
+    def handle_endtag(self, tag: str) -> None:
+        if tag.casefold() in self.IGNORED_TAGS and self.ignored_depth:
+            self.ignored_depth -= 1
+
+    def handle_data(self, data: str) -> None:
+        if not self.ignored_depth and data.strip():
+            self.parts.append(data)
+
+
+def visible_html_text(text: str) -> str:
+    parser = VisibleHTMLTextParser()
+    parser.feed(text)
+    return re.sub(r"\s+", " ", " ".join(parser.parts)).strip()
+
+
+def visual_artifact_failures(text: str, config: dict[str, Any]) -> list[str]:
+    """Validate the standalone, reader-facing HTML deliverable."""
+
+    failures: list[str] = []
+    lowered = text.casefold()
+    visible = visible_html_text(text)
+    quality = config.get("quality", {})
+    min_chars = int(quality.get("min_visual_html_chars", 24000))
+    min_svgs = int(quality.get("min_visual_svg_count", 3))
+    min_sections = int(quality.get("min_visual_section_count", 16))
+    min_tables = int(quality.get("min_visual_table_count", 2))
+
+    if not re.match(r"^\s*<!doctype\s+html\s*>", text, flags=re.IGNORECASE):
+        failures.append("visual artifact must start with <!doctype html>")
+    if not re.search(r"<html\b[^>]*\blang\s*=\s*['\"]ko['\"]", text, flags=re.IGNORECASE):
+        failures.append('visual artifact must use <html lang="ko">')
+    for element in ["<head", "<body", "<title", "<style", "<h1"]:
+        if element not in lowered:
+            failures.append(f"missing visual artifact element: {element}")
+    if not re.search(r"<meta\b[^>]*name\s*=\s*['\"]viewport['\"]", text, flags=re.IGNORECASE):
+        failures.append("visual artifact is missing responsive viewport metadata")
+    if "@media print" not in lowered and "@page" not in lowered:
+        failures.append("visual artifact is missing print CSS")
+
+    svg_open = len(re.findall(r"<svg\b", text, flags=re.IGNORECASE))
+    svg_close = len(re.findall(r"</svg\s*>", text, flags=re.IGNORECASE))
+    if svg_open < min_svgs:
+        failures.append(f"inline SVG count {svg_open} < {min_svgs}")
+    if svg_open != svg_close:
+        failures.append(f"unbalanced inline SVG tags: open={svg_open}, close={svg_close}")
+    if svg_open and not re.search(r"<svg\b.*?<text\b", text, flags=re.IGNORECASE | re.DOTALL):
+        failures.append("inline SVG diagrams contain no readable text labels")
+
+    section_count = len(re.findall(r"<h2\b", text, flags=re.IGNORECASE))
+    if section_count < min_sections:
+        failures.append(f"technical section count {section_count} < {min_sections}")
+    table_count = len(re.findall(r"<table\b", text, flags=re.IGNORECASE))
+    if table_count < min_tables:
+        failures.append(f"technical table count {table_count} < {min_tables}")
+    if len(text) < min_chars:
+        failures.append(f"visual artifact length {len(text)} < {min_chars}")
+
+    required_section_groups = [
+        ("기술 분야", ["기술 분야"]),
+        ("배경 기술", ["배경 기술"]),
+        ("기존 기술의 문제점", ["기존 기술의 문제점", "기존 방식의 문제점"]),
+        ("발명의 목적", ["발명의 목적"]),
+        ("발명의 핵심 구성", ["발명의 핵심 구성", "발명의 핵심 개념"]),
+        ("전체 시스템 구성", ["전체 시스템 구성"]),
+        ("구성요소별 상세 설명", ["구성요소별 상세 설명"]),
+        ("동작 절차", ["동작 절차", "검사 및 검증 동작 절차"]),
+        ("판단식 및 변수 설명", ["판단식 및 변수 설명", "판단식 및 검증 로직"]),
+        ("데이터 구조", ["데이터 구조"]),
+        ("결과 반영 방식", ["결과 반영 방식", "제어 반영 방식", "제어 입력 잠금 방식"]),
+        ("도면 설명", ["도면 설명"]),
+        ("상세 실시예", ["상세 실시예"]),
+        ("예외 실시예 및 실패 처리", ["예외 실시예 및 실패 처리"]),
+        ("복구 및 정상 복귀 절차", ["복구 및 정상 복귀 절차", "중앙 복귀 또는 정상 복귀 절차"]),
+        ("기존 기술과의 구분점", ["기존 기술과의 구분점"]),
+        ("기대 효과", ["기대 효과"]),
+        ("변형예 및 구현 고려사항", ["변형예 및 구현 고려사항", "변형예", "구현 시 고려사항"]),
+    ]
+    for label, alternatives in required_section_groups:
+        if not any(term in visible for term in alternatives):
+            failures.append(f"missing reader-facing technical section: {label}")
+
+    forbidden_visible_terms = [
+        "한 문장 요약",
+        "근거 초안",
+        "근거초안",
+        "특허 담당자 검토 요청 사항",
+        "특허 생성 루프",
+        "하네스 통과",
+        "레드팀",
+        "DIRECT_OK",
+        "FINAL_VERDICT",
+        "심사 점수표",
+        "선행기술",
+        "특허성 조사",
+        "청구항",
+        "독립항",
+        "종속항",
+        "AI 보조",
+        "이 문서를 읽는 방법",
+        "한 줄로",
+        "추천 이유",
+        "쉽게 풀어",
+        "오히려",
+        "똑똑",
+        "마케팅",
+        "프레젠테이션",
+        "service replacement",
+        "harness repair",
+        "pack variant activation",
+        "manufacturing recipe rollback",
+    ]
+    for term in forbidden_visible_terms:
+        if term.casefold() in visible.casefold():
+            failures.append(f"visual artifact contains forbidden reader-facing term: {term}")
+
+    for ending in ["입니다", "합니다", "습니다", "아닙니다"]:
+        if ending in visible:
+            failures.append(f"visual artifact must use Korean technical-document 한다체, found: {ending}")
+
+    for sentinel in ["@@", "§§", "[초안 확인 필요"]:
+        if sentinel in text:
+            failures.append(f"visual artifact contains unresolved placeholder/sentinel: {sentinel}")
+    for corruption in ["B밀리초", "b밀리초", "@@B잠금", "resIDual", "l내e", "cur내g", "ga내", "estima대상r"]:
+        if corruption in text:
+            failures.append(f"visual artifact contains mechanical replacement corruption: {corruption}")
+
+    if re.search(r"<script\b", text, flags=re.IGNORECASE):
+        failures.append("visual artifact must not contain JavaScript")
+    if re.search(r"<link\b[^>]*rel\s*=\s*['\"]?stylesheet", text, flags=re.IGNORECASE):
+        failures.append("visual artifact must not depend on an external stylesheet")
+    if re.search(r"(?:src|href)\s*=\s*['\"]https?://", text, flags=re.IGNORECASE):
+        failures.append("visual artifact must not depend on external images, scripts, or links")
+    if re.search(r"url\(\s*['\"]?https?://", text, flags=re.IGNORECASE):
+        failures.append("visual artifact CSS must not depend on external assets")
+    return failures
+
+
 def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[str, Any] | None = None) -> tuple[bool, list[str]]:
     text = read_text(path)
     failures: list[str] = []
@@ -1432,32 +1590,26 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
             failures.extend(grade_failures(text, config))
         if not has_any(text, ["FINAL_VERDICT: DIRECT_OK", "FINAL_VERDICT: REJECT"]):
             failures.append("missing valid FINAL_VERDICT token")
-    elif stage == "visualize":
-        lowered = text.lower()
+    elif stage in {"visualize", "visual_revise"}:
+        failures.extend(visual_artifact_failures(text, config))
+    elif stage == "visual_review":
         required = [
-            "<!doctype html",
-            "<html",
-            "<style",
-            "<svg",
-            "요약",
-            "배경",
-            "해결하고자 하는 문제",
-            "문제 해결 접근",
-            "세부 내용",
+            "# 기술문서 구현 가능성 검토 보고서",
+            "## 원문 충실성",
+            "## 문서 완결성",
+            "## 구성요소별 구현 가능성",
+            "## 판단식·변수·임계값 점검",
+            "## 데이터 구조·상태 전이·실패 처리 점검",
+            "## 실시예 재현성",
+            "## 도식 검토",
+            "## 보완 지시",
+            "## 최종 판정",
+            "FINAL_VERDICT:",
         ]
-        failures.extend([f"missing visual artifact element: {name}" for name in required if name.lower() not in lowered])
-        forbidden = [
-            "선행기술",
-            "하네스",
-            "레드팀",
-            "청구항",
-            "특허성 조사",
-            "DIRECT_OK",
-            "FINAL_VERDICT",
-        ]
-        failures.extend([f"visual artifact contains forbidden term: {term}" for term in forbidden if term in text])
-        if len(text) < 12000:
-            failures.append("visual artifact is too short for a self-contained official overview")
+        failures.extend([f"missing visual review section: {name}" for name in required if name not in text])
+        review_verdicts = re.findall(r"FINAL_VERDICT:\s*(DIRECT_OK|REJECT)", text)
+        if len(review_verdicts) != 1:
+            failures.append(f"visual review must contain exactly one valid FINAL_VERDICT token, found {len(review_verdicts)}")
     else:
         failures.append(f"unknown stage: {stage}")
 
@@ -1592,7 +1744,23 @@ def artifact_context(item: dict[str, Any], stage: str) -> str:
             ("verification_path", "독립 검증 보고서"),
         ]
     elif stage == "visualize":
-        keys = [("final_path", "최종 특허 명세서")]
+        keys = [
+            ("final_path", "최종 특허 명세서"),
+            ("draft_path", "원문 상세 초안"),
+        ]
+    elif stage == "visual_review":
+        keys = [
+            ("visual_path", "검토 대상 HTML 기술문서"),
+            ("final_path", "최종 특허 명세서"),
+            ("draft_path", "원문 상세 초안"),
+        ]
+    elif stage == "visual_revise":
+        keys = [
+            ("visual_review_path", "기술문서 구현 가능성 검토 보고서"),
+            ("visual_path", "보정 대상 HTML 기술문서"),
+            ("final_path", "최종 특허 명세서"),
+            ("draft_path", "원문 상세 초안"),
+        ]
     else:
         keys = []
     chunks: list[str] = []
@@ -1603,7 +1771,20 @@ def artifact_context(item: dict[str, Any], stage: str) -> str:
         path = workspace_path(raw, label=f"{key} artifact path")
         text = read_text(path)
         if text:
-            chunks.append(f"## {label}: {path}\n\n{text[:50000]}")
+            if stage in {"visualize", "visual_review", "visual_revise"}:
+                artifact_limit = {
+                    "visual_path": 120000,
+                    "final_path": 90000,
+                    "draft_path": 70000,
+                    "visual_review_path": 50000,
+                }.get(key, 70000)
+            else:
+                artifact_limit = 50000
+            if len(text) > artifact_limit:
+                head_chars = artifact_limit * 3 // 5
+                tail_chars = artifact_limit - head_chars
+                text = text[:head_chars] + "\n\n[... artifact middle omitted by harness ...]\n\n" + text[-tail_chars:]
+            chunks.append(f"## {label}: {path}\n\n{text}")
     return "\n\n".join(chunks)
 
 
@@ -1772,6 +1953,16 @@ def output_path_for(item: dict[str, Any], stage: str) -> Path:
         return workspace_path(ROOT / "reports" / f"{item_id}_external_spotcheck_{slug_time()}.md", label="external spotcheck output path")
     if stage == "visualize":
         return workspace_path(ROOT / "visuals" / f"{item_id}_overview_{slug_time()}.html", label="visual output path")
+    if stage == "visual_revise":
+        return workspace_path(
+            ROOT / "visuals" / f"{item_id}_overview_revised_{slug_time()}.html",
+            label="revised visual output path",
+        )
+    if stage == "visual_review":
+        return workspace_path(
+            ROOT / "reports" / f"{item_id}_visual_review_{slug_time()}.md",
+            label="visual review output path",
+        )
     filename = {
         "idea": "01_idea.md",
         "research": "015_prior_art_gate.md",
@@ -1799,19 +1990,36 @@ def build_prompt(item: dict[str, Any], stage: str, output_path: Path, config: di
     if repair_notes:
         repair_block = "\n\n## 이전 검증 실패\n\n" + "\n".join(f"- {note}" for note in repair_notes)
 
-    if stage == "visualize":
+    if stage in {"visualize", "visual_revise"}:
+        task_label = "initial source-faithful HTML drafting" if stage == "visualize" else "review-driven HTML correction"
         return "\n\n".join(
             [
-                'Start the "Patent Generation Loop" visual explanation stage.',
+                f"Start the final technical-document stage: {task_label}.",
                 f"Workspace root: {ROOT}\nStage: {stage}\nOutput path: {output_path}",
                 "Write exactly one complete, static HTML file to the output path above.\n"
-                "Use only the final specification as source material. Do not include internal process notes, evaluation notes, prior-art analysis, or metadata.\n"
-                "The HTML must be understandable as a standalone official company technical overview for readers with no background context.",
-                "# Backlog Item\n\n```json\n" + json.dumps(item, ensure_ascii=False, indent=2, sort_keys=True) + "\n```",
+                "The final specification is authoritative. Use the source draft only to restore supported detail omitted during condensation. "
+                "Never add a mechanism, formula, threshold, data field, control effect, or example value absent from both sources.\n"
+                "Do not include internal process notes, evaluation history, authoring metadata, or generation disclosures in the reader-facing HTML.\n"
+                "The HTML must be a standalone individual-invention technical document that a first-time engineer and patent professional can follow.",
                 "# Role Instructions\n\n" + role,
                 field_block,
-                "# Final Specification\n\n" + (context if context else "No final specification is available.") + repair_block,
+                "# Source Materials\n\n" + (context if context else "No source specification is available.") + repair_block,
                 f"# Exit Condition\n\nThe artifact exists at `{output_path}` and satisfies the required output format for stage `{stage}`.",
+            ]
+        ).strip() + "\n"
+
+    if stage == "visual_review":
+        return "\n\n".join(
+            [
+                "Start an independent implementation-readiness review of the final reader-facing HTML.",
+                f"Workspace root: {ROOT}\nStage: {stage}\nOutput path: {output_path}",
+                "Write exactly one Markdown review report to the output path above. "
+                "Judge the HTML only against the supplied final specification and source draft. "
+                "Do not reward prior pipeline status, and do not demand unsupported invented numbers when the source uses symbolic or calibrated values.",
+                "# Role Instructions\n\n" + role,
+                field_block,
+                "# Review Materials\n\n" + (context if context else "No review materials are available.") + repair_block,
+                f"# Exit Condition\n\nThe review exists at `{output_path}` and ends with exactly one valid `FINAL_VERDICT:` token.",
             ]
         ).strip() + "\n"
 
@@ -2164,13 +2372,41 @@ def update_item_after_success(
         if item["status"] == "needs_revision":
             item["iteration"] = int(item.get("iteration", 0)) + 1
     elif stage == "visualize":
-        item["status"] = "finalized"
+        item["status"] = "visual_review_ready"
+        item["visual_path"] = rel
+    elif stage == "visual_review":
+        item["visual_review_path"] = rel
+        if verdict(output_path) == "DIRECT_OK":
+            item["status"] = "finalized"
+        else:
+            item["status"] = "visual_revision_needed"
+            item["visual_iteration"] = int(item.get("visual_iteration", 0)) + 1
+    elif stage == "visual_revise":
+        item["status"] = "visual_review_ready"
         item["visual_path"] = rel
     item["updated_at"] = now()
 
 
 def maybe_reject_for_revision_limit(item: dict[str, Any], config: dict[str, Any]) -> bool:
     stage = stage_for(item)
+    if stage == "visual_revise":
+        max_cycles = int(config["loop"].get("max_visual_revision_cycles", 3))
+        if int(item.get("visual_iteration", 0)) >= max_cycles:
+            item["status"] = "blocked"
+            item["updated_at"] = now()
+            item.setdefault("notes", []).append(
+                {
+                    "at": now(),
+                    "stage": "visual_revision_limit",
+                    "decision": "MAX_VISUAL_REVISION_CYCLES_REACHED",
+                    "reason": (
+                        f"Stopped at max_visual_revision_cycles={max_cycles}; the reader-facing HTML did not pass "
+                        "source-fidelity and implementation-readiness review."
+                    ),
+                }
+            )
+            return True
+        return False
     if stage not in {"draft", "examine", "redteam", "revise"}:
         return False
     max_cycles = int(config["loop"].get("max_revision_cycles", 5))
@@ -2508,6 +2744,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             ("verify", item.get("verification_path")),
             ("external_spotcheck", item.get("external_spotcheck_path")),
             ("visualize", item.get("visual_path")),
+            ("visual_review", item.get("visual_review_path")),
         ]
         for stage, raw in checks:
             if not raw:
