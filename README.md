@@ -61,11 +61,11 @@ novelty (notably in the EPO's absolute-novelty regime).
   presence, counts, a regex-extracted grade, and the `FINAL_VERDICT` / `GO_DECISION`
   token. It is a format/lint layer; passing it is not a patentability judgment.
 - **Evaluation stages share one model.** The writer, examiner, red-team, verifier,
-  and spot-check all use the same configured `[runner]` model. Despite the
-  `context_free` / `independent` / `external` stage names, they are the same model
-  re-applying the standard from a fresh prompt — not an independent second opinion.
-  For a genuine cross-check, point those stages at a different model/provider, or
-  review with a human.
+  spot-check, HTML writer, implementation-readiness reviewer, and HTML reviser all
+  use the same configured `[runner]` model. Despite the `context_free` / `independent` /
+  `external` stage names, they are the same model re-applying the standard from a fresh
+  prompt — not an independent second-provider opinion. For a genuine cross-check, point
+  those stages at a different model/provider, or review with a human.
 - **Output is Korean / KIPO-oriented.** The prompts and the validator's required
   section headings are Korean. `--field` retargets the *subject*, not the output
   language; non-Korean output will not pass validation as shipped.
