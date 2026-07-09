@@ -72,6 +72,8 @@ PROMPTS = {
     "visual_revise": "80_visual_reviser.md",
 }
 
+VISUAL_CONTRACT_VERSION = 2
+
 
 def now() -> str:
     return dt.datetime.now().astimezone().isoformat(timespec="seconds")
@@ -1160,6 +1162,15 @@ def requires_strict_idea_screening(item: dict[str, Any] | None) -> bool:
 
 def markdown_table_data_rows(text: str) -> int:
     rows = 0
+    header_names = {
+        "후보",
+        "candidate",
+        "Candidate",
+        "구성요소/검증 항목",
+        "구성요소",
+        "검증 항목",
+        "항목",
+    }
     for line in text.splitlines():
         stripped = line.strip()
         if not stripped.startswith("|") or not stripped.endswith("|"):
@@ -1169,7 +1180,7 @@ def markdown_table_data_rows(text: str) -> int:
             continue
         if all(re.fullmatch(r":?-{3,}:?", cell) for cell in cells):
             continue
-        if cells[0] in {"후보", "candidate", "Candidate"}:
+        if cells[0] in header_names:
             continue
         rows += 1
     return rows
@@ -1417,6 +1428,101 @@ def visual_artifact_failures(text: str, config: dict[str, Any]) -> list[str]:
     return failures
 
 
+def legacy_visual_artifact_failures(text: str) -> list[str]:
+    """Preserve validation behavior for pre-v2 finalized overview artifacts."""
+
+    failures: list[str] = []
+    lowered = text.casefold()
+    required = [
+        "<!doctype html",
+        "<html",
+        "<style",
+        "<svg",
+        "요약",
+        "배경",
+        "해결하고자 하는 문제",
+        "문제 해결 접근",
+        "세부 내용",
+    ]
+    failures.extend([f"missing legacy visual artifact element: {name}" for name in required if name.casefold() not in lowered])
+    forbidden = ["선행기술", "레드팀", "청구항", "특허성 조사", "DIRECT_OK", "FINAL_VERDICT"]
+    failures.extend([f"legacy visual artifact contains forbidden term: {term}" for term in forbidden if term in text])
+    if len(text) < 12000:
+        failures.append("legacy visual artifact is too short for the pre-v2 overview contract")
+    return failures
+
+
+def visual_review_failures(text: str, config: dict[str, Any]) -> list[str]:
+    """Reject hollow review shells before they can finalize an item."""
+
+    failures: list[str] = []
+    quality = config.get("quality", {})
+    min_chars = int(quality.get("min_visual_review_chars", 2500))
+    min_section_chars = int(quality.get("min_visual_review_section_chars", 80))
+    min_component_chars = int(quality.get("min_visual_review_component_chars", 350))
+    min_component_rows = int(quality.get("min_visual_review_component_rows", 2))
+    headings = [
+        "원문 충실성",
+        "문서 완결성",
+        "구성요소별 구현 가능성",
+        "판단식·변수·임계값 점검",
+        "데이터 구조·상태 전이·실패 처리 점검",
+        "실시예 재현성",
+        "도식 검토",
+        "보완 지시",
+        "최종 판정",
+    ]
+
+    if "# 기술문서 구현 가능성 검토 보고서" not in text:
+        failures.append("missing visual review title")
+    if len(text) < min_chars:
+        failures.append(f"visual review length {len(text)} < {min_chars}")
+
+    bodies: dict[str, str] = {}
+    for heading in headings:
+        body = section_text(text, heading).strip()
+        bodies[heading] = body
+        if not body:
+            failures.append(f"missing or empty visual review section: {heading}")
+
+    for heading in headings[:7]:
+        compact = re.sub(r"\s+", " ", bodies[heading]).strip()
+        required_chars = min_component_chars if heading == "구성요소별 구현 가능성" else min_section_chars
+        if compact and len(compact) < required_chars:
+            failures.append(f"visual review section is too thin: {heading} ({len(compact)} < {required_chars})")
+
+    component_rows = markdown_table_data_rows(bodies["구성요소별 구현 가능성"])
+    if component_rows < min_component_rows:
+        failures.append(f"visual review component evidence rows {component_rows} < {min_component_rows}")
+
+    review_verdicts = re.findall(r"FINAL_VERDICT:\s*(DIRECT_OK|REJECT)", text)
+    if len(review_verdicts) != 1:
+        failures.append(f"visual review must contain exactly one valid FINAL_VERDICT token, found {len(review_verdicts)}")
+        return failures
+    review_verdict = review_verdicts[0]
+    if "FINAL_VERDICT:" not in bodies["최종 판정"]:
+        failures.append("visual review FINAL_VERDICT token must appear under 최종 판정")
+
+    remediation = bodies["보완 지시"]
+    if review_verdict == "DIRECT_OK":
+        normalized = re.sub(r"(?m)^\s*[-*]\s*", "", remediation).strip().rstrip(".")
+        if normalized != "없음":
+            failures.append("DIRECT_OK visual review must state only '없음' under 보완 지시")
+    elif len(re.sub(r"\s+", " ", remediation).strip()) < min_section_chars or bullet_count(remediation) < 1:
+        failures.append("REJECT visual review must provide concrete itemized remediation instructions")
+    return failures
+
+
+def visual_validation_stage(item: dict[str, Any]) -> str:
+    if item.get("visual_review_path") or item.get("status") in {"visual_review_ready", "visual_revision_needed"}:
+        return "visualize"
+    try:
+        version = int(item.get("visual_contract_version", 1))
+    except (TypeError, ValueError):
+        version = 1
+    return "visualize" if version >= VISUAL_CONTRACT_VERSION else "visualize_legacy"
+
+
 def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[str, Any] | None = None) -> tuple[bool, list[str]]:
     text = read_text(path)
     failures: list[str] = []
@@ -1590,26 +1696,12 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
             failures.extend(grade_failures(text, config))
         if not has_any(text, ["FINAL_VERDICT: DIRECT_OK", "FINAL_VERDICT: REJECT"]):
             failures.append("missing valid FINAL_VERDICT token")
+    elif stage == "visualize_legacy":
+        failures.extend(legacy_visual_artifact_failures(text))
     elif stage in {"visualize", "visual_revise"}:
         failures.extend(visual_artifact_failures(text, config))
     elif stage == "visual_review":
-        required = [
-            "# 기술문서 구현 가능성 검토 보고서",
-            "## 원문 충실성",
-            "## 문서 완결성",
-            "## 구성요소별 구현 가능성",
-            "## 판단식·변수·임계값 점검",
-            "## 데이터 구조·상태 전이·실패 처리 점검",
-            "## 실시예 재현성",
-            "## 도식 검토",
-            "## 보완 지시",
-            "## 최종 판정",
-            "FINAL_VERDICT:",
-        ]
-        failures.extend([f"missing visual review section: {name}" for name in required if name not in text])
-        review_verdicts = re.findall(r"FINAL_VERDICT:\s*(DIRECT_OK|REJECT)", text)
-        if len(review_verdicts) != 1:
-            failures.append(f"visual review must contain exactly one valid FINAL_VERDICT token, found {len(review_verdicts)}")
+        failures.extend(visual_review_failures(text, config))
     else:
         failures.append(f"unknown stage: {stage}")
 
@@ -2374,16 +2466,18 @@ def update_item_after_success(
     elif stage == "visualize":
         item["status"] = "visual_review_ready"
         item["visual_path"] = rel
+        item["visual_contract_version"] = VISUAL_CONTRACT_VERSION
     elif stage == "visual_review":
         item["visual_review_path"] = rel
         if verdict(output_path) == "DIRECT_OK":
             item["status"] = "finalized"
         else:
             item["status"] = "visual_revision_needed"
-            item["visual_iteration"] = int(item.get("visual_iteration", 0)) + 1
     elif stage == "visual_revise":
         item["status"] = "visual_review_ready"
         item["visual_path"] = rel
+        item["visual_contract_version"] = VISUAL_CONTRACT_VERSION
+        item["visual_iteration"] = int(item.get("visual_iteration", 0)) + 1
     item["updated_at"] = now()
 
 
@@ -2734,6 +2828,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
         if seed_failures:
             failures_total += len(seed_failures)
             print(f"FAIL {item.get('id', '<missing-id>')} seed backlog: {'; '.join(seed_failures)}")
+        visual_stage = visual_validation_stage(item)
         checks = [
             ("idea", item.get("idea_path")),
             ("research", item.get("research_path")),
@@ -2743,7 +2838,7 @@ def cmd_validate(args: argparse.Namespace) -> int:
             ("finalize", item.get("final_path")),
             ("verify", item.get("verification_path")),
             ("external_spotcheck", item.get("external_spotcheck_path")),
-            ("visualize", item.get("visual_path")),
+            (visual_stage, item.get("visual_path")),
             ("visual_review", item.get("visual_review_path")),
         ]
         for stage, raw in checks:

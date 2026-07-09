@@ -183,6 +183,10 @@ min_visual_html_chars = 24000
 min_visual_svg_count = 3
 min_visual_section_count = 16
 min_visual_table_count = 2
+min_visual_review_chars = 2500
+min_visual_review_section_chars = 80
+min_visual_review_component_chars = 350
+min_visual_review_component_rows = 2
 
 [paths]
 archive = ""

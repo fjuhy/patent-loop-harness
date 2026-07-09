@@ -643,6 +643,50 @@ FINAL_VERDICT: MAYBE
             f"</head><body><h1>시험 발명</h1>{body}{tables}{svgs}</body></html>"
         )
 
+    @staticmethod
+    def _valid_visual_review(verdict: str = "DIRECT_OK") -> str:
+        detail = (
+            "최종 명세서와 원문 상세 초안의 입력, 측정, 판단, 실패 처리, 결과 반영, 복구 조건을 서로 대조했다. "
+            "HTML 본문은 해당 인과관계를 같은 용어로 설명하고 원문에 없는 숫자나 제어 효과를 추가하지 않았다. "
+            "구현자는 입력 인터페이스와 기록 필드, 상태별 허용 동작을 문서 안에서 식별할 수 있다. "
+        )
+        remediation = "- 없음" if verdict == "DIRECT_OK" else (
+            "- `동작 절차`의 실패 분기에 원문 상세 초안의 안전측 처리와 복구 조건을 연결한다. "
+            "현재 HTML 위치와 원문 근거를 함께 표시하고 새로운 임계값은 추가하지 않는다."
+        )
+        return f"""# 기술문서 구현 가능성 검토 보고서
+
+## 원문 충실성
+- {detail * 2}
+
+## 문서 완결성
+- {detail * 2}
+
+## 구성요소별 구현 가능성
+| 구성요소/검증 항목 | 입력·출처 | 측정·생성 | 계산·판정 | 통과/실패 결과 | 결과 반영 | 판정 |
+| --- | --- | --- | --- | --- | --- | --- |
+| 입력 수집부 | 원문 입력 구조 | 원문 측정 구간에서 수집 | 원문 조건식으로 판정 | 통과와 실패를 분리 | 결과 연결과 기록 | 충족. {detail} |
+| 상태 판정부 | 원문 상태 필드 | 원문 생성 절차를 사용 | 변수 의미와 기준을 대조 | 실패 시 안전측 처리 | 복구 조건과 연결 | 충족. {detail} |
+
+## 판단식·변수·임계값 점검
+- {detail * 2}
+
+## 데이터 구조·상태 전이·실패 처리 점검
+- {detail * 2}
+
+## 실시예 재현성
+- {detail * 2}
+
+## 도식 검토
+- {detail * 2}
+
+## 보완 지시
+{remediation}
+
+## 최종 판정
+FINAL_VERDICT: {verdict}
+"""
+
     def test_visual_artifact_contract_accepts_complete_source_faithful_html(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))
         from patent_loop_harness.cli import visual_artifact_failures
@@ -686,6 +730,7 @@ FINAL_VERDICT: MAYBE
                 item = {"id": "visual-review-001", "status": "visualization_ready"}
                 cli.update_item_after_success(item, "visualize", html_path, config={"loop": {}})
                 self.assertEqual(item["status"], "visual_review_ready")
+                self.assertEqual(item["visual_contract_version"], 2)
                 self.assertEqual(cli.stage_for(item), "visual_review")
 
                 reject_path = Path(tmp) / "reports" / "review-reject.md"
@@ -693,13 +738,14 @@ FINAL_VERDICT: MAYBE
                 reject_path.write_text("FINAL_VERDICT: REJECT\n", encoding="utf-8")
                 cli.update_item_after_success(item, "visual_review", reject_path, config={"loop": {}})
                 self.assertEqual(item["status"], "visual_revision_needed")
-                self.assertEqual(item["visual_iteration"], 1)
+                self.assertEqual(item.get("visual_iteration", 0), 0)
                 self.assertEqual(cli.stage_for(item), "visual_revise")
 
                 revised_path = Path(tmp) / "visuals" / "item-revised.html"
                 revised_path.write_text(self._valid_visual_html(), encoding="utf-8")
                 cli.update_item_after_success(item, "visual_revise", revised_path, config={"loop": {}})
                 self.assertEqual(item["status"], "visual_review_ready")
+                self.assertEqual(item["visual_iteration"], 1)
 
                 pass_path = Path(tmp) / "reports" / "review-pass.md"
                 pass_path.write_text("FINAL_VERDICT: DIRECT_OK\n", encoding="utf-8")
@@ -709,16 +755,98 @@ FINAL_VERDICT: MAYBE
             finally:
                 cli.ROOT = old_root
 
-    def test_visual_review_validation_requires_implementation_sections(self) -> None:
+    def test_visual_review_validation_requires_substantive_implementation_evidence(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))
         from patent_loop_harness.cli import validate_stage
 
+        hollow = """# 기술문서 구현 가능성 검토 보고서
+## 원문 충실성
+## 문서 완결성
+## 구성요소별 구현 가능성
+## 판단식·변수·임계값 점검
+## 데이터 구조·상태 전이·실패 처리 점검
+## 실시예 재현성
+## 도식 검토
+## 보완 지시
+- 없음
+## 최종 판정
+FINAL_VERDICT: DIRECT_OK
+"""
         with tempfile.TemporaryDirectory() as tmp:
             path = Path(tmp) / "review.md"
-            path.write_text("# 기술문서 구현 가능성 검토 보고서\nFINAL_VERDICT: DIRECT_OK\n", encoding="utf-8")
+            path.write_text(hollow, encoding="utf-8")
             ok, failures = validate_stage("visual_review", path, {"quality": {}})
             self.assertFalse(ok)
-            self.assertTrue(any("구성요소별 구현 가능성" in failure for failure in failures), failures)
+            self.assertTrue(any("empty" in failure or "too thin" in failure for failure in failures), failures)
+            self.assertTrue(any("component evidence rows" in failure for failure in failures), failures)
+
+            path.write_text(self._valid_visual_review(), encoding="utf-8")
+            ok, failures = validate_stage("visual_review", path, {"quality": {}})
+            self.assertTrue(ok, failures)
+
+    def test_visual_review_verdict_requires_consistent_remediation(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import visual_review_failures
+
+        direct_with_work = self._valid_visual_review().replace("- 없음", "- 동작 절차를 수정한다.")
+        failures = visual_review_failures(direct_with_work, {"quality": {}})
+        self.assertTrue(any("must state only '없음'" in failure for failure in failures), failures)
+
+        reject_without_work = self._valid_visual_review("REJECT").replace(
+            "- `동작 절차`의 실패 분기에 원문 상세 초안의 안전측 처리와 복구 조건을 연결한다. 현재 HTML 위치와 원문 근거를 함께 표시하고 새로운 임계값은 추가하지 않는다.",
+            "없음",
+        )
+        failures = visual_review_failures(reject_without_work, {"quality": {}})
+        self.assertTrue(any("concrete itemized" in failure for failure in failures), failures)
+
+    def test_visual_revision_limit_counts_completed_rewrites(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        import patent_loop_harness.cli as cli
+
+        with tempfile.TemporaryDirectory() as tmp:
+            old_root = cli.ROOT
+            try:
+                cli.ROOT = Path(tmp)
+                item = {"id": "visual-limit-001", "status": "visual_revision_needed", "visual_iteration": 2}
+                config = {"loop": {"max_visual_revision_cycles": 3}}
+                self.assertFalse(cli.maybe_reject_for_revision_limit(item, config))
+
+                revised_path = Path(tmp) / "visuals" / "third-revision.html"
+                revised_path.parent.mkdir()
+                revised_path.write_text(self._valid_visual_html(), encoding="utf-8")
+                cli.update_item_after_success(item, "visual_revise", revised_path, config=config)
+                self.assertEqual(item["visual_iteration"], 3)
+
+                reject_path = Path(tmp) / "reports" / "third-review.md"
+                reject_path.parent.mkdir()
+                reject_path.write_text("FINAL_VERDICT: REJECT\n", encoding="utf-8")
+                cli.update_item_after_success(item, "visual_review", reject_path, config=config)
+                self.assertEqual(item["status"], "visual_revision_needed")
+                self.assertTrue(cli.maybe_reject_for_revision_limit(item, config))
+                self.assertEqual(item["status"], "blocked")
+            finally:
+                cli.ROOT = old_root
+
+    def test_legacy_visual_contract_is_grandfathered_for_old_finalized_items(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import validate_stage, visual_validation_stage
+
+        self.assertEqual(visual_validation_stage({"status": "finalized"}), "visualize_legacy")
+        self.assertEqual(visual_validation_stage({"status": "finalized", "visual_contract_version": 2}), "visualize")
+        self.assertEqual(visual_validation_stage({"status": "visual_review_ready"}), "visualize")
+
+        legacy = (
+            "<!doctype html><html><head><style>body{color:#111}</style></head><body>"
+            "<h1>요약</h1><svg></svg><h2>배경</h2><h2>해결하고자 하는 문제</h2>"
+            "<h2>문제 해결 접근</h2><h2>세부 내용</h2>" + ("기존 기술 설명 " * 1500) + "</body></html>"
+        )
+        with tempfile.TemporaryDirectory() as tmp:
+            path = Path(tmp) / "legacy.html"
+            path.write_text(legacy, encoding="utf-8")
+            old_ok, old_failures = validate_stage("visualize_legacy", path, {"quality": {}})
+            new_ok, new_failures = validate_stage("visualize", path, {"quality": {}})
+            self.assertTrue(old_ok, old_failures)
+            self.assertFalse(new_ok, new_failures)
 
 
 if __name__ == "__main__":

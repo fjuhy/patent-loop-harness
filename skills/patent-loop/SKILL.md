@@ -90,6 +90,8 @@ patent-loop run \
 - `run --dry-run` writes `task_prompt.md` and prints `prompt_path` plus `output_path`; inspect those files when debugging prompt construction.
 - A live run updates `state/backlog.jsonl`, `state/status.json`, `logs/metrics.jsonl`, and a stage artifact under `work/`, `final/`, `reports/`, or `visuals/`.
 - The reader-facing deliverable is one standalone, source-faithful HTML file under `visuals/`. `visual_review_ready` means the HTML awaits an independent implementation-readiness review; `visual_revision_needed` means the next stage will revise that same individual document from the review findings.
+- `visual_iteration` counts completed HTML rewrites, so `max_visual_revision_cycles = 3` allows three actual rewrite attempts. A heading-only review report cannot finalize an item; substantive section text, component-evidence rows, and verdict-consistent remediation are required.
+- New HTML uses `visual_contract_version = 2`. `validate` keeps pre-v2 finalized HTML on the legacy overview contract while applying the strict contract to all new artifacts.
 - `finalized` is reached only after the HTML reviewer returns `DIRECT_OK`. Do not hand off an item merely because the Markdown specification or the first HTML draft exists.
 - `blocked` means the harness could not validate the generated artifact after allowed repair attempts, or the bounded HTML review/revision loop was exhausted. Inspect the artifact, runner logs, reviewer report, and appended guardrail note.
 - `rejected` can be an expected high-confidence outcome, especially after prior-art or red-team gates.

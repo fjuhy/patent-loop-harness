@@ -198,9 +198,17 @@ standalone HTML technical document under `visuals/`, then runs an independent
 implementation-readiness review of that HTML.
 
 The item reaches `finalized` only after the HTML review returns `DIRECT_OK`.
-A rejected HTML enters a bounded `visual_revise -> visual_review` loop; it is
-blocked after `max_visual_revision_cycles` rather than silently shipping an
-incomplete document.
+A rejected HTML enters a bounded `visual_revise -> visual_review` loop. The
+`max_visual_revision_cycles` value counts completed HTML rewrites; the default `3`
+therefore allows three actual revision attempts before the next unresolved rejection
+blocks the item. Review reports also fail closed when they contain only headings: each
+substantive section, component-evidence rows, and verdict-consistent remediation must
+be present.
+
+New HTML artifacts are tagged with `visual_contract_version = 2` in backlog state.
+`patent-loop validate` applies the strict v2 contract to them, while finalized artifacts
+created before v2 continue to use the legacy overview validator. This compatibility path
+does not weaken validation for newly generated files.
 
 The HTML contract is intentionally strict:
 
