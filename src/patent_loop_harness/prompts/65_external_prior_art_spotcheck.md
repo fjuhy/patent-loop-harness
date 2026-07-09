@@ -10,12 +10,12 @@
 2. 기존 최종본/검증 보고서에 적힌 선행기술을 그대로 믿지 말고, 외부 공개자료를 새로 검색한다.
 3. 검색은 특허/논문/제품자료를 섞어 최소 8개 쿼리 축으로 수행한다.
 4. 최소 8개 외부 reference를 가장 가까운 순서로 정리한다. 가능하면 Google Patents, USPTO, EPO, WIPO, arXiv, Semantic Scholar, 제조사 datasheet/application note 같은 직접 확인 가능한 자료를 우선한다.
-5. 단일문헌 102 공격과 복수문헌 103 공격을 각각 가장 세게 구성한다.
+5. 단일문헌 102 공격과 복수문헌 103 공격을 각각 유지 가능한(sustainable) 범위에서 가장 강하게 구성한다. 가상의 최강 공격이 아니라 출원인 명세서상 기술효과 반박을 견디는 거절만 인정한다.
 6. `공지 진단/검사 + 공지 target-field fail-safe/admission/control gate + freshness/token/table update`로 독립항 전체가 설명되면 `REJECT`한다.
 7. `공지 보안/attestation/hash/MAC/freshness/HSM/retained log/signed request + 공지 target-field safety/control gate`로 독립항 대부분이 설명되면, 남은 차이가 별도 비예측적 기술효과를 만들지 않는 한 `REJECT`한다.
 8. Runtime Field label, micro-boundary heading/table column 같은 하네스 형식 표지는 별도 점검한다. 표지 누락만으로 102/103/기재요건 점수를 낮추지 않는다. 반대로 독립항 필수 구성의 target field 결속이 실체적으로 약하면 형식 표지 존재와 무관하게 `REJECT`한다.
-9. 신규성, 진보성, 명세서 뒷받침/명확성, 권리범위 방어력 중 하나라도 `A-` 미만이면 `REJECT`한다.
-10. 새 검색을 충분히 수행하지 못했거나 외부 reference가 부족하면 `DIRECT_OK`를 주지 않는다.
+9. 각 축에 대해 새로 식별한 외부 선행기술로 유지 가능한 prima facie 거절을 구성할 수 있을 때만 `REJECT`한다. 경계선 점수만으로는 REJECT하지 않는다.
+10. 외부 검색이 불충분하면 `HARNESS_PASS_REVIEW: 불충분검색`으로 기록하되, 식별된 외부 선행기술이 없으면 그 자체는 REJECT/DEMOTE 사유가 아니다. 거절은 새로 식별한 외부 문헌으로 유지 가능한 prima facie 거절을 구성한 경우에만 한다.
 11. `DIRECT_OK`는 실제 출원 가능성 보장이 아니라, 외부 spot check 기준으로 "보수 감사 후에도 출원 검토 후보로 남김"이라는 뜻이다.
 
 ## 평가 기준
@@ -26,7 +26,7 @@
 - 가장 강한 103 조합에서도 독립항의 핵심 causal chain까지 가는 명확한 결합 동기가 약하고, 그 결합이 단순히 공지 보안/진단/제어 요소의 예측 가능한 병렬 적용이 아니다.
 - 핵심 차별점이 token, hash, freshness, version check, stored table update가 아니라 target-field physical/data/process response와 target-field control/admission/model/process output 사이의 구체 결속이다.
 - 독립항이 결과 지향적 기능 선언이 아니라 측정 조건, residual/signature 계산, admission/consume hook, fail-closed fallback을 구체적으로 포함한다.
-- 출원 전 보정이 필요하더라도, 현재 문서가 `B+` 또는 조건부 통과 수준으로 내려가지 않는다.
+- 출원 전 보정이 필요한 수준(B+/B)이라는 사실 자체는 demote 사유가 아니다 — 외부 문헌으로 prima facie 거절이 구성되지 않으면 `KEEP_FINAL_PASS`다. 보정 포인트는 "보정 없이는 위험한 지점"에 적는다.
 
 ## 출력 형식
 

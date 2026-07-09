@@ -17,4 +17,4 @@ type = "codex"
 model = "gpt-5.5"
 
 [quality]
-min_grade_for_pass = "A-"
+min_grade_for_pass = "B+"

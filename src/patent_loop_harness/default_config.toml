@@ -16,8 +16,9 @@ domains = [
   "battery software verification",
   "battery software architecture"
 ]
-max_revision_cycles = 3
-redteam_reject_terminal_after_iteration = 3
+max_revision_cycles = 5
+redteam_reject_terminal_after_iteration = 5
+max_research_attempts = 3
 max_items_per_run = 1
 min_claims_for_draft = 12
 min_claims_for_final = 18
@@ -170,8 +171,13 @@ state_path = "state/claude_usage.json"
 [quality]
 min_prior_art_search_queries = 8
 min_closest_references = 8
-min_grade_for_pass = "A-"
-forbid_conditional_pass = true
+# Allowance gate uses a preponderance standard (allow unless a prima facie rejection
+# actually stands), not certainty. Inventive step (진보성) is the real gate; the other
+# axes need only clear a hard B floor, so borderline-but-allowable claims pass.
+min_grade_for_pass = "B+"
+min_grade_inventive_step = "B+"
+min_grade_any_axis = "B"
+forbid_conditional_pass = false
 
 [paths]
 archive = ""

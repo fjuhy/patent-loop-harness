@@ -13,7 +13,7 @@
 5. Runtime Field label, micro-boundary heading/table column 같은 하네스 형식 표지는 별도 점검한다. 이 표지가 빠졌다는 이유만으로 실체 특허성 점수를 낮추지 말고, `FORMAT_ISSUE`로 기록한다. 단, 독립항 자체가 target field 경계에 직접 결속되지 않으면 실체 결함으로 `REJECT`한다.
 6. "다른 LLM이 새로 보면 거절할 만한 이유"를 최소 3개 시도하고, 문서 내부에서 반박되는지 확인한다.
 7. 103 거절은 실제 심사관처럼 KSR식 예측 가능한 조합 여부를 중심으로 본다. 공지 보안/attestation/hash/freshness/log/latch를 공지 target-field control gate에 붙인 것만으로는 `A-` 진보성이 아니다.
-8. 신규성, 진보성, 명세서 뒷받침/명확성, 권리범위 방어력 중 하나라도 `A-` 미만이면 `REJECT`한다.
+8. 각 축(신규성/진보성/명세서 뒷받침/명확성/권리범위 방어력)에 대해, 식별된 선행기술 또는 명세서 자체 결함으로부터 유지 가능한 prima facie 거절을 실제로 구성할 수 있을 때만 `REJECT`한다. 경계선 점수만으로는 REJECT하지 않는다. KSR식 예측 가능한 조합으로 독립항 차이까지 자명함이 논증되면 진보성 prima facie 거절로 보고 `REJECT`, 그 논증이 안 되면 통과시킨다.
 
 ## 출력 형식
 

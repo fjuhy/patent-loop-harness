@@ -8,7 +8,7 @@
 
 기본 설정의 target field는 배터리 산업 SW다. 그 경우에만 차량 배터리, ESS, BMS, PCS, 배터리 팩/모듈/셀, 충전, SOx/열화/수명, 배터리 운전/검증/시뮬레이션/클라우드/디지털 트윈 경계를 기본 허용 분야로 본다.
 
-일반화는 기준 완화가 아니다. field 명칭과 경계만 치환하고, kill/reject 기준, A- 최소 등급, claim-level 선행기술 매핑, problem-solution 판단, context-free 평가 강도는 기존 배터리 프로필과 동일하거나 더 엄격하게 적용한다. target field 직접 결속이 애매하면 통과시키지 않는다.
+일반화는 기준 완화가 아니다. field 명칭과 경계만 치환하고, kill/reject 기준, claim-level 선행기술 매핑, problem-solution 판단, context-free 평가 강도는 기존 배터리 프로필과 동일하게 적용한다. target field 직접 결속이 애매하면 통과시키지 않는다. 단, 이 "애매하면 탈락" 원칙은 target field 결속(scope)에만 적용한다. 실체 특허성(신규성/진보성/기재요건)에서는 반대로, 식별된 선행기술로 prima facie 거절을 구성하지 못하면 통과시킨다 — 불확실성은 거절 사유가 아니라 계속 검색 사유다.
 
 아래 주제는 후보로 진행하지 않는다.
 
@@ -42,7 +42,7 @@
 - 진보성은 KSR식 "공지 요소를 알려진 문제에 예측 가능한 방식으로 결합했는가"를 중심으로 판단한다. 단일문헌에 전체 결합이 없다는 이유만으로 `A-`를 주지 않는다.
 - `공지 진단/검사/센서/로그 + 공지 보안/attestation/hash/MAC/freshness/token/versioning + 공지 target-field fail-safe/control/admission gate` 조합이 독립항 대부분을 설명하고, 남는 차이가 통상적인 safety-critical actuator authorization 또는 local policy enforcement라면 `DIRECT_OK`가 아니라 `REJECT`다.
 - 특히 security, attestation, secure log, remote command, freshness, HSM, latch, retained storage, signed request 계열은 모두 출발점에서 공지로 본다. target field에 적용했다는 사실만으로는 진보성이 아니다.
-- `DIRECT_OK`는 강한 KSR 조합 공격 후에도 독립항의 남는 차이가 문서 자체에서 비예측적 기술효과와 구체 구현 경로로 방어될 때만 부여한다. 신규성은 있으나 실제 office action에서 103이 B+/경계선이면 `REJECT`하고 보정 지시를 낸다.
+- `DIRECT_OK`는 식별된 선행기술 + KSR식 예측 가능성 분석으로 독립항의 남는 차이까지 자명하다고 단정하는 유지 가능한 prima facie 103을 심사관이 구성하지 못할 때 부여한다. 103이 B+/경계선이라는 것은 심사관이 prima facie 진보성 부정을 입증하지 못했다는 뜻이므로 실제 심사에서 허여 사유다 — `DIRECT_OK`로 하고 강화 포인트는 보정 지시에 적는다. `REJECT`는 명백히 예측 가능한 조합으로 남는 차이까지 설명되고 문서가 어떤 비예측적 기술효과도 제시하지 못할 때만 한다. 출원인이 명세서에서 비예측적 기술효과를 제시했다면 그 효과는 거절을 뒤집는 rebuttal로 작동하므로 무시하지 않는다.
 
 ## 안티 게이밍
 

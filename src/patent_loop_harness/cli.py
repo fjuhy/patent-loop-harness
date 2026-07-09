@@ -244,6 +244,8 @@ def stage_for(item: dict[str, Any]) -> str | None:
         return "idea"
     if status == "idea_ready":
         return "research"
+    if status == "research_retry":
+        return "research"
     if status == "research_ready":
         return "draft"
     if status == "draft_ready":
@@ -1084,7 +1086,7 @@ def extract_grade(text: str, label: str) -> str | None:
     grades: list[str] = []
     for candidate in grade_aliases(label):
         line_pattern = re.compile(
-            rf"^\s*(?:[-*]\s*)?{re.escape(candidate)}\s*:\s*([A-F][+-]?)\b",
+            rf"^\s*(?:[-*]\s*)?{re.escape(candidate)}\s*:\s*([A-F][+-]?)(?![A-Za-z0-9])",
             re.MULTILINE,
         )
         table_pattern = re.compile(
@@ -1100,10 +1102,11 @@ def extract_grade(text: str, label: str) -> str | None:
 
 
 def grade_failures(text: str, config: dict[str, Any], labels: list[str] | None = None) -> list[str]:
-    min_grade = str(config["quality"].get("min_grade_for_pass", "A-")).upper()
-    min_value = grade_value(min_grade)
-    if min_value is None:
-        return [f"invalid configured min_grade_for_pass={min_grade}"]
+    quality = config["quality"]
+    inv_floor = grade_value(str(quality.get("min_grade_inventive_step", quality.get("min_grade_for_pass", "B+"))).upper())
+    any_floor = grade_value(str(quality.get("min_grade_any_axis", "B")).upper())
+    if inv_floor is None or any_floor is None:
+        return ["invalid configured grade floor (min_grade_inventive_step/min_grade_any_axis)"]
     labels = labels or ["신규성", "진보성", "명세서 뒷받침/명확성", "권리범위 방어력"]
     failures: list[str] = []
     for label in labels:
@@ -1112,8 +1115,11 @@ def grade_failures(text: str, config: dict[str, Any], labels: list[str] | None =
             failures.append(f"missing grade: {label}")
             continue
         value = grade_value(raw)
-        if value is None or value < min_value:
-            failures.append(f"grade {label}={raw} < {min_grade}")
+        # Preponderance, not certainty: inventive step (진보성) is the real gate; other
+        # axes only need to clear a hard B floor. Borderline-but-allowable passes.
+        floor = inv_floor if label == "진보성" else any_floor
+        if value is None or value < floor:
+            failures.append(f"grade {label}={raw} below floor")
     ambiguous_pass = re.compile(
         r"조건부\s*(?:출원|통과|진행|합격|가치)|중간\s*이상|보완\s*필요|간신히\s*통과"
     )
@@ -1455,12 +1461,10 @@ def validate_stage(stage: str, path: Path, config: dict[str, Any], item: dict[st
     else:
         failures.append(f"unknown stage: {stage}")
 
-    if stage in SEARCH_REQUIRED_STAGES and "RESEARCH_LIMITATION" in text:
-        if "FINAL_VERDICT: DIRECT_OK" in text or "GO_DECISION: PROCEED_NARROW" in text:
-            failures.append(
-                "RESEARCH_LIMITATION present but stage reached a pass verdict; a real prior-art "
-                "search is required to pass (fail-closed)"
-            )
+    # Note: incomplete search ("RESEARCH_LIMITATION") is deliberately NOT a ground of
+    # refusal here — that conflates examiner-side search incompleteness with the
+    # invention being unpatentable. Real web search is still required (and verified
+    # via web_search_requirement_failure) so a pass cannot rest on no search at all.
 
     return not failures, failures
 
@@ -1744,7 +1748,12 @@ def context_isolation_block(stage: str) -> str:
         "- Use only the stage artifact(s) under `# Existing Artifacts` and independently verifiable references as substantive evidence.\n"
         "- Treat backlog status, notes, prior pass/fail decisions, prior DIRECT_OK tokens, guardrail history, and harness metrics as procedural metadata only.\n"
         "- Do not reward the candidate because it previously advanced through the loop; re-apply the same objective examiner standard from scratch.\n"
-        "- If the document itself does not support an A- or stronger answer to novelty, inventive step, clarity/support, and claim-scope defense, reject it.\n"
+        "- Allow (DIRECT_OK / KEEP_FINAL_PASS) unless you can articulate a STANDING prima facie rejection on this record: "
+        "a single anticipatory reference (102), a KSR-predictable combination with a concrete, art-based reason to combine "
+        "and a reasonable expectation of success (103), or an unmet 112 support/clarity defect. Inventive step that is "
+        "arguable but defensible (borderline / B+) is an allowance with the residual risk noted, NOT a rejection. "
+        "Do NOT reject merely because patentability cannot be confirmed to certainty, because a stronger combination is "
+        "imaginable, or because the search feels incomplete — inability to establish a prima facie ground favors the applicant.\n"
         "- Separate substantive patentability from harness format compliance: missing Runtime Field labels or micro-boundary headings are format issues, not 102/103/112 defects by themselves.\n"
         "- Still reject substantively if claim-level elements are not directly tied to the configured target field.\n"
         "- For inventive step, apply a realistic examiner/KSR predictable-combination screen. Known security, attestation, hash/MAC, freshness, retained-log, signed-request, HSM, latch, or remote-command checks applied to a known target-field safety/control gate are not A- inventive unless the document shows a non-predictable technical coupling and effect."
@@ -2069,15 +2078,37 @@ def update_item_after_success(
         if gate_decision == "PROCEED_NARROW":
             item["status"] = "research_ready"
         elif gate_decision == "NEED_MORE_SEARCH":
-            item["status"] = "rejected"
-            item.setdefault("notes", []).append(
-                {
-                    "at": now(),
-                    "stage": stage,
-                    "decision": gate_decision,
-                    "reason": "Research gate did not find an A- narrow survival path; stop before drafting and move to a different seed.",
-                }
-            )
+            attempts = int(item.get("research_attempts", 0)) + 1
+            item["research_attempts"] = attempts
+            max_attempts = int((config or {}).get("loop", {}).get("max_research_attempts", 3))
+            if attempts < max_attempts:
+                item["status"] = "research_retry"
+                item.setdefault("notes", []).append(
+                    {
+                        "at": now(),
+                        "stage": stage,
+                        "decision": gate_decision,
+                        "reason": (
+                            f"Search not yet sufficient to decide; re-running the prior-art gate "
+                            f"(attempt {attempts}/{max_attempts}). Incomplete search is not a ground of refusal."
+                        ),
+                        "attempt": attempts,
+                    }
+                )
+            else:
+                item["status"] = "rejected"
+                item.setdefault("notes", []).append(
+                    {
+                        "at": now(),
+                        "stage": stage,
+                        "decision": "NEED_MORE_SEARCH_EXHAUSTED",
+                        "reason": (
+                            f"Research gate spent max_research_attempts={max_attempts} without identifying a single "
+                            "anticipatory reference or an articulated KSR-predictable combination, and without isolating "
+                            "a narrow survivable claim. Closing on the closed record."
+                        ),
+                    }
+                )
         else:
             item["status"] = "rejected"
             item.setdefault("notes", []).append({"at": now(), "stage": stage, "decision": gate_decision or "missing"})

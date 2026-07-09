@@ -519,7 +519,7 @@ FINAL_VERDICT: MAYBE
         self.assertIsNone(web_search_requirement_failure("examine", {"type": "codex", "require_web_search": False}, unsearched))
         self.assertIsNone(web_search_requirement_failure("examine", {"type": "shell", "require_web_search": True}, unsearched))
 
-    def test_research_limitation_with_pass_verdict_fails_closed(self) -> None:
+    def test_research_limitation_with_pass_verdict_is_allowed(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))
         from patent_loop_harness.cli import load_config, validate_stage
 
@@ -544,8 +544,8 @@ FINAL_VERDICT: MAYBE
                 encoding="utf-8",
             )
             ok, failures = validate_stage("examine", path, load_config())
-            self.assertFalse(ok)
-            self.assertTrue(any("RESEARCH_LIMITATION" in f for f in failures), failures)
+            # incomplete search (RESEARCH_LIMITATION) is no longer a ground of refusal
+            self.assertTrue(ok, failures)
 
     def test_codex_usage_skips_malformed_session_lines(self) -> None:
         sys.path.insert(0, str(REPO_ROOT / "src"))
@@ -580,6 +580,31 @@ FINAL_VERDICT: MAYBE
         profile = field_profile(example)
         self.assertFalse(profile["battery_default"], profile["scope_terms"][:5])
         self.assertNotIn("bms", [t.lower() for t in profile["scope_terms"]])
+
+    def test_research_retry_status_routes_to_research(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import stage_for
+
+        self.assertEqual(stage_for({"status": "research_retry"}), "research")
+        self.assertEqual(stage_for({"status": "idea_ready"}), "research")
+
+    def test_grade_failures_uses_preponderance_floors(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import grade_failures
+
+        cfg = {"quality": {"min_grade_inventive_step": "B+", "min_grade_any_axis": "B", "forbid_conditional_pass": False}}
+
+        def doc(nov: str, inv: str, sup: str, scope: str) -> str:
+            return f"신규성: {nov}\n진보성: {inv}\n명세서 뒷받침/명확성: {sup}\n권리범위 방어력: {scope}\n"
+
+        # borderline-but-allowable: inventive step B+, other axes B -> passes (preponderance)
+        self.assertEqual(grade_failures(doc("B", "B+", "B", "B"), cfg), [])
+        # inventive step below the B+ floor -> fails on 진보성
+        self.assertTrue(any("진보성" in f for f in grade_failures(doc("A-", "B", "A-", "A-"), cfg)))
+        # another axis below the hard B floor -> fails
+        self.assertTrue(any("신규성" in f for f in grade_failures(doc("B-", "A-", "A-", "A-"), cfg)))
+        # all A- still passes
+        self.assertEqual(grade_failures(doc("A-", "A-", "A-", "A-"), cfg), [])
 
 
 if __name__ == "__main__":
