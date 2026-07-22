@@ -91,7 +91,7 @@ python3 -m pip install -e ../patent-loop-harness
 Then run the CLI from the private workbench root:
 
 ```bash
-cd ../patent-workbench-private
+cd ../patent-drafts
 patent-loop run --dry-run --max-items 1
 ```
 
