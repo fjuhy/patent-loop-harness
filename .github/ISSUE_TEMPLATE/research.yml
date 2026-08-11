@@ -1,0 +1,42 @@
+name: 조사·의사결정
+description: 불확실한 문제를 조사하고 결론과 근거를 남깁니다.
+title: "[Research] "
+labels:
+  - type:research
+  - priority:P2
+body:
+  - type: textarea
+    id: question
+    attributes:
+      label: 조사 질문
+      description: 이번 조사로 답해야 하는 질문을 명확히 적습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: context
+    attributes:
+      label: 맥락과 제약
+      description: 현재 가정, 제약, 관련 시스템 또는 자료를 적습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: alternatives
+    attributes:
+      label: 검토 대안
+      description: 비교할 대안과 평가 기준을 적습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: decision
+    attributes:
+      label: 결론과 근거
+      description: 조사 후 결론을 채우고 근거 링크나 측정 결과를 남깁니다.
+    validations:
+      required: true
+  - type: textarea
+    id: output
+    attributes:
+      label: 후속 작업
+      description: 결론에서 파생되는 이슈, PR, 문서 또는 보류 사항을 적습니다.
+    validations:
+      required: true

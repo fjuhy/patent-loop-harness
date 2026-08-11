@@ -1,0 +1,61 @@
+name: 작업 스펙
+description: 기능, 변경, 산출물의 범위와 완료 조건을 정의합니다.
+title: "[Spec] "
+labels:
+  - type:spec
+  - priority:P2
+body:
+  - type: markdown
+    attributes:
+      value: |
+        이슈 하나는 검토·구현·검증 가능한 작업 단위입니다.
+        민감정보, 토큰, 비공개 원문은 이슈에 붙이지 마세요.
+  - type: textarea
+    id: summary
+    attributes:
+      label: 요약
+      description: 무엇을 만들거나 바꾸는지 한 문장으로 적습니다.
+      placeholder: 사용자가 ... 할 수 있도록 ... 한다.
+    validations:
+      required: true
+  - type: textarea
+    id: problem
+    attributes:
+      label: 문제와 배경
+      description: 현재 상태, 문제, 이 작업이 필요한 이유를 적습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: scope
+    attributes:
+      label: 범위와 비범위
+      description: 포함할 것과 이번 작업에서 하지 않을 것을 나눠 적습니다.
+      placeholder: |
+        포함:
+        - 
+        제외:
+        - 
+    validations:
+      required: true
+  - type: textarea
+    id: acceptance
+    attributes:
+      label: 완료 조건
+      description: 검토자가 확인할 수 있는 조건을 체크리스트로 적습니다.
+      placeholder: |
+        - [ ] 
+        - [ ] 
+    validations:
+      required: true
+  - type: textarea
+    id: validation
+    attributes:
+      label: 검증 계획
+      description: 실행할 테스트, 수동 확인, 산출물 또는 근거를 적습니다.
+    validations:
+      required: true
+  - type: textarea
+    id: dependencies
+    attributes:
+      label: 의존성·위험·결정 필요사항
+      description: 막힘 요소나 선행 작업이 없으면 없다고 적습니다.
