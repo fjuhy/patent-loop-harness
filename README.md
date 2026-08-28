@@ -192,8 +192,11 @@ command = ["python3", "tools/my_agent.py", "--prompt", "{prompt_file}", "--out",
 prompt_mode = "file"
 ```
 
-If the CLI prints its result instead of writing the file, the harness copies stdout
-to the output path. When `web_search_evidence_pattern` is set, `scout` / `research`
+The prompt is delivered exactly once: with `prompt_mode = "arg"` or a `{prompt}`
+placeholder it goes on argv and stdin is closed (so interactive CLIs don't hang);
+otherwise it is piped on stdin. Prompts run tens of KB, so prefer `stdin`/`file`
+over argv where the CLI allows. If the CLI prints its result instead of writing
+the file, the harness copies stdout to the output path. When `web_search_evidence_pattern` is set, `scout` / `research`
 / `examine` / `redteam` / `external_spotcheck` fail closed unless the pattern matches
 the CLI's output; `patent-loop doctor --runner-smoke` checks the whole wiring live.
 Runner flags change often, so treat the snippets above as starting points and

@@ -860,13 +860,15 @@ def runner_profile(config: dict[str, Any]) -> dict[str, Any]:
     else:
         common = {"type": "codex", "enabled": True}
 
-    runner_type = str(common.get("type", "codex")).strip().lower()
-    runner_type = RUNNER_TYPE_ALIASES.get(runner_type, runner_type)
+    raw_type = str(common.get("type", "codex")).strip().lower()
+    runner_type = RUNNER_TYPE_ALIASES.get(raw_type, raw_type)
     if runner_type not in RUNNER_TYPES:
         raise RuntimeError(f"unsupported runner type: {runner_type}")
 
-    provider_specific = common.get(runner_type, {})
-    merged = {key: value for key, value in common.items() if key not in RUNNER_PROVIDER_KEYS}
+    # `[runner.custom]` (alias table) is honored the same as `[runner.shell]`.
+    provider_specific = common.get(runner_type) or common.get(raw_type, {})
+    provider_keys = RUNNER_PROVIDER_KEYS | set(RUNNER_TYPE_ALIASES)
+    merged = {key: value for key, value in common.items() if key not in provider_keys}
     if isinstance(provider_specific, dict):
         merged.update(provider_specific)
     if runner_type == "codex" and isinstance(legacy_codex, dict):
@@ -1772,7 +1774,20 @@ def is_capacity_error(result: subprocess.CompletedProcess[str]) -> bool:
 
 
 def shell_search_pattern(runner_cfg: dict[str, Any] | None) -> str:
-    return str((runner_cfg or {}).get("web_search_evidence_pattern", "") or "").strip()
+    pattern = str((runner_cfg or {}).get("web_search_evidence_pattern", "") or "").strip()
+    if pattern:
+        try:
+            re.compile(pattern)
+        except re.error as exc:
+            raise RuntimeError(f"[runner.shell].web_search_evidence_pattern is not a valid regex: {exc}") from exc
+    return pattern
+
+
+def shell_prompt_in_argv(runner_cfg: dict[str, Any]) -> bool:
+    if shell_prompt_mode(runner_cfg) == "arg":
+        return True
+    parts = runner_argv(runner_cfg.get("command")) + runner_argv(runner_cfg.get("extra_args"))
+    return any("{prompt}" in part for part in parts)
 
 
 def web_search_evidence(runner_type: str, stdout: str, stderr: str, runner_cfg: dict[str, Any] | None = None) -> bool:
@@ -2295,6 +2310,8 @@ def build_shell_command(
     if not command:
         raise RuntimeError("shell runner command is empty")
     mode = shell_prompt_mode(runner_cfg)
+    if mode == "arg" and any("{prompt}" in part for part in command):
+        raise RuntimeError("[runner.shell]: use either prompt_mode = \"arg\" or a {prompt} placeholder, not both")
     values = {
         "{prompt_file}": str(prompt_path or ""),
         "{output_path}": str(output_path or ""),
@@ -2355,7 +2372,7 @@ def run_agent(
             prompt_path = ROOT / "logs" / f"{runner_type}-prompt-{item_id}-{stage}-{stamp}.md"
             write_text(prompt_path, prompt)
         command = build_shell_command(runner_cfg, prompt=prompt, prompt_path=prompt_path, output_path=output_path, stage=stage)
-        if shell_prompt_mode(runner_cfg) != "stdin":
+        if shell_prompt_mode(runner_cfg) != "stdin" or shell_prompt_in_argv(runner_cfg):
             stdin_text = None
     else:
         raise RuntimeError(f"unsupported runner type: {runner_type}")
@@ -2371,12 +2388,15 @@ def run_agent(
             result = subprocess.run(
                 command,
                 input=stdin_text,
+                stdin=None if stdin_text is not None else subprocess.DEVNULL,
                 text=True,
                 capture_output=True,
                 timeout=int(runner_cfg.get("timeout_seconds", 3600)),
                 cwd=str(ROOT),
                 env=runner_child_env(runner_cfg),
             )
+        except OSError as exc:
+            raise RuntimeError(f"{runner_type} runner could not start ({exc}); if the prompt is passed via argv, switch prompt_mode to stdin or file") from exc
         except subprocess.TimeoutExpired as exc:
             timeout_stdout = exc.stdout if isinstance(exc.stdout, str) else (exc.stdout or b"").decode("utf-8", "replace")
             timeout_stderr = exc.stderr if isinstance(exc.stderr, str) else (exc.stderr or b"").decode("utf-8", "replace")
@@ -2740,21 +2760,27 @@ def build_scout_prompt(config: dict[str, Any], output_path: Path, count: int, re
 
 def parse_seed_output(text: str) -> list[dict[str, Any]]:
     body = text.strip()
-    fence = re.search(r"```(?:json)?\s*(.*?)```", body, flags=re.DOTALL)
+    # Greedy so a ``` inside a hypothesis string does not truncate the block.
+    fence = re.search(r"```(?:json)?\s*(.*)```", body, flags=re.DOTALL)
     if fence:
         body = fence.group(1).strip()
     if not body:
         raise RuntimeError("scout output is empty")
-    try:
-        data = json.loads(body)
-    except json.JSONDecodeError as exc:
-        start, end = body.find("{"), body.rfind("}")
-        if start < 0 or end <= start:
-            raise RuntimeError(f"scout output is not JSON: {exc}") from exc
+    candidates = [body]
+    for open_char, close_char in [("{", "}"), ("[", "]")]:
+        start, end = body.find(open_char), body.rfind(close_char)
+        if start >= 0 and end > start:
+            candidates.append(body[start : end + 1])
+    data: Any = None
+    last_error: Exception | None = None
+    for candidate in candidates:
         try:
-            data = json.loads(body[start : end + 1])
-        except json.JSONDecodeError as inner:
-            raise RuntimeError(f"scout output is not JSON: {inner}") from inner
+            data = json.loads(candidate)
+            break
+        except json.JSONDecodeError as exc:
+            last_error = exc
+    else:
+        raise RuntimeError(f"scout output is not JSON: {last_error}")
     seeds = data.get("seeds") if isinstance(data, dict) else data
     if not isinstance(seeds, list):
         raise RuntimeError("scout output must be a JSON object with a `seeds` array")
@@ -2804,7 +2830,13 @@ def ingest_scout_seeds(
     return accepted, rejected
 
 
-def run_scout(config: dict[str, Any], count: int, dry_run: bool = False, no_runner: bool = False) -> dict[str, Any]:
+def run_scout(
+    config: dict[str, Any],
+    count: int,
+    dry_run: bool = False,
+    no_runner: bool = False,
+    ignore_usage_guard: bool = False,
+) -> dict[str, Any]:
     ensure_layout()
     runner_cfg = runner_profile(config)
     runner_type = str(runner_cfg["type"])
@@ -2828,19 +2860,24 @@ def run_scout(config: dict[str, Any], count: int, dry_run: bool = False, no_runn
         )
         return {"ran": True, "stage": "scout", "requested": count, "prompt_path": prompt_path, "output_path": output_path, "dry_run": True}
 
-    guard = usage_guard_for_item({"id": "scout", "status": "seed"}, config)
-    if guard:
-        guard["stage"] = "scout"
-        return guard
+    if not ignore_usage_guard:
+        guard = usage_guard_for_item({"id": "scout", "status": "seed"}, config)
+        if guard:
+            guard["stage"] = "scout"
+            return guard
 
     repair_attempts = int(runner_cfg.get("repair_attempts", 1))
     failures: list[str] = []
     accepted: list[dict[str, Any]] = []
     rejected: list[dict[str, Any]] = []
     for attempt in range(repair_attempts + 1):
+        # Each attempt must produce its own file; a stale seeds.json from an attempt
+        # that failed the search gate must never be re-ingested.
+        accepted, rejected = [], []
         if attempt:
             prompt = build_scout_prompt(config, output_path, count, repair_notes=failures)
             write_text(prompt_path, prompt)
+            output_path.unlink(missing_ok=True)
         result = run_agent(prompt, output_path, config, "scout", "scout", prompt_path=prompt_path)
         if result.returncode != 0:
             failures = [f"{runner_type} runner returned {result.returncode}"]
@@ -2881,15 +2918,17 @@ def run_scout(config: dict[str, Any], count: int, dry_run: bool = False, no_runn
         },
     )
     if not accepted:
-        record_guardrail("scout", {"id": "scout"}, failures or ["no seeds accepted"])
+        failures = failures or ["no seeds accepted"]
+        record_guardrail("scout", {"id": "scout"}, failures)
     return {
-        "ran": True,
+        "ran": bool(accepted),
         "stage": "scout",
         "requested": count,
         "accepted": [item["id"] for item in accepted],
         "rejected": rejected,
         "output_path": output_path,
         "failures": failures if len(accepted) < count else [],
+        **({} if accepted else {"reason": "scout accepted no seeds: " + "; ".join(failures[:3])}),
     }
 
 
@@ -2907,7 +2946,13 @@ def cmd_scout(args: argparse.Namespace) -> int:
     if count < 1:
         raise RuntimeError("--count must be at least 1")
     with LoopLock(LOCK_PATH):
-        result = run_scout(config, count, dry_run=args.dry_run, no_runner=args.no_runner)
+        result = run_scout(
+            config,
+            count,
+            dry_run=args.dry_run,
+            no_runner=args.no_runner,
+            ignore_usage_guard=bool(getattr(args, "ignore_usage_guard", False)),
+        )
     print(json.dumps(printable_result(result), ensure_ascii=False, sort_keys=True))
     if result.get("dry_run") or result.get("accepted"):
         return 0
@@ -2995,13 +3040,17 @@ def cmd_run(args: argparse.Namespace) -> int:
         items = load_backlog()
         results = []
         scouted = False
+        dry_run_skipped: set[str] = set()
         for _ in range(max_items):
-            item = next_item(items, stage_only=args.stage_only, field=field)
+            candidates = [entry for entry in items if str(entry.get("id")) not in dry_run_skipped]
+            item = next_item(candidates, stage_only=args.stage_only, field=field)
             if item is None and auto_scout and not scouted and not args.dry_run and args.stage_only in {None, "idea"}:
                 # Category-only operation: refill the backlog from the target field,
                 # then keep going in the same run.
                 scouted = True
-                scout_result = run_scout(config, scout_count, no_runner=args.no_runner)
+                scout_result = run_scout(
+                    config, scout_count, no_runner=args.no_runner, ignore_usage_guard=args.ignore_usage_guard
+                )
                 results.append(scout_result)
                 if not scout_result.get("accepted"):
                     break
@@ -3013,7 +3062,9 @@ def cmd_run(args: argparse.Namespace) -> int:
             if scope_result:
                 results.append(scope_result)
                 if args.dry_run:
-                    break
+                    # Preview the same path a real run takes: skip this seed, look at the next.
+                    dry_run_skipped.add(str(item.get("id")))
+                    continue
                 save_backlog(items)
                 continue
             if not args.ignore_usage_guard:
@@ -3299,6 +3350,7 @@ def build_parser() -> argparse.ArgumentParser:
     scout.add_argument("--count", type=int, default=None, help="seeds to request; defaults to [scout].count")
     scout.add_argument("--dry-run", action="store_true", help="write the scout prompt without invoking a runner")
     scout.add_argument("--no-runner", dest="no_runner", action="store_true", help="alias of --dry-run for scripting symmetry with run")
+    scout.add_argument("--ignore-usage-guard", action="store_true", help="explicitly bypass the new-idea usage guard for this scout")
     scout.set_defaults(func=cmd_scout)
 
     status = sub.add_parser("status", help="Show loop status")

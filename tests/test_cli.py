@@ -1038,6 +1038,82 @@ auto_when_empty = true
         self.assertTrue(web_search_evidence("shell", "no pattern configured", ""))
         self.assertTrue(web_search_evidence("shell", "[tool] web_search(q=...)", "", {"web_search_evidence_pattern": r"web_search\("}))
         self.assertFalse(web_search_evidence("shell", "nothing", "", {"web_search_evidence_pattern": r"web_search\("}))
+        with self.assertRaises(RuntimeError):
+            web_search_evidence("shell", "x", "", {"web_search_evidence_pattern": "web_search("})
+
+    def test_runner_alias_table_and_prompt_delivery_rules(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import build_shell_command, runner_profile, shell_prompt_in_argv
+
+        profile = runner_profile({"runner": {"type": "custom", "custom": {"command": ["my-agent"], "prompt_mode": "arg"}}})
+        self.assertEqual(profile["type"], "shell")
+        self.assertEqual(profile["command"], ["my-agent"])
+        self.assertEqual(profile["prompt_mode"], "arg")
+        self.assertNotIn("custom", profile)
+
+        self.assertTrue(shell_prompt_in_argv({"command": ["x", "{prompt}"]}))
+        self.assertTrue(shell_prompt_in_argv({"command": ["x"], "prompt_mode": "arg"}))
+        self.assertFalse(shell_prompt_in_argv({"command": ["x", "{prompt_file}"]}))
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_runner = Path(tmp) / "runner"
+            fake_runner.write_text("#!/bin/sh\n", encoding="utf-8")
+            with self.assertRaises(RuntimeError):
+                build_shell_command({"command": [str(fake_runner), "{prompt}"], "prompt_mode": "arg"}, prompt="p")
+
+    def test_parse_seed_output_accepts_arrays_prose_and_inner_fences(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import parse_seed_output
+
+        self.assertEqual(len(parse_seed_output('Here are the seeds:\n[{"id": "a"}, {"id": "b"}]')), 2)
+        self.assertEqual(len(parse_seed_output('```json\n{"seeds": [{"id": "a", "hypothesis": "uses ``` inside"}]}\n```')), 1)
+        self.assertEqual(parse_seed_output('{"seeds": [{"id": "a"}, "junk"]}'), [{"id": "a"}])
+        with self.assertRaises(RuntimeError):
+            parse_seed_output("no json here")
+
+    def test_scout_retry_never_reingests_stale_output(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            # Attempt 1: writes seeds but no search evidence. Attempt 2: searched, but
+            # writes nothing. The attempt-1 file must not leak into the backlog.
+            agent = root / "flaky_agent.py"
+            agent.write_text(
+                "import json, sys, pathlib\n"
+                "prompt_file, output_path = sys.argv[1:3]\n"
+                "marker = pathlib.Path(output_path).parent / 'attempted'\n"
+                "if not marker.exists():\n"
+                "    marker.write_text('1')\n"
+                f"    open(output_path, 'w').write(json.dumps({{'seeds': [{{'id': 'leak', 'title': 'Leak', 'hypothesis': {self.VALID_SEED_HYPOTHESIS!r}}}]}}))\n"
+                "    raise SystemExit(0)\n"
+                "print('web search: second attempt')\n",
+                encoding="utf-8",
+            )
+            self.write_shell_runner_config(root, agent, search_pattern="^web search:")
+            result = run_cli(["scout", "--count", "1"], root)
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual(payload["accepted"], [])
+            self.assertFalse(payload["ran"])
+            self.assertIn("reason", payload)
+            self.assertFalse((root / "state" / "backlog.jsonl").exists())
+            status = json.loads((root / "state" / "status.json").read_text(encoding="utf-8")) if (root / "state" / "status.json").exists() else {}
+            self.assertNotEqual(status.get("last_completed_stage"), "scout")
+
+    def test_dry_run_skips_out_of_scope_seed_and_previews_next_item(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            base = {"priority": 100, "status": "seed", "created_at": "2026-01-01T00:00:00+00:00", "updated_at": "2026-01-01T00:00:00+00:00"}
+            out_of_scope = {**base, "id": "unrelated-001", "title": "Unrelated", "domain": "other", "hypothesis": "nothing relevant", "priority": 200}
+            valid = {**base, "id": "battery-ok-001", "title": "Battery gate", "domain": "ESS", "hypothesis": "battery cell echo residual gate stale"}
+            (root / "state" / "backlog.jsonl").write_text(json.dumps(out_of_scope) + "\n" + json.dumps(valid) + "\n", encoding="utf-8")
+
+            result = run_cli(["run", "--dry-run", "--max-items", "2", "--runner", "prompt_only"], root)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            lines = [json.loads(line) for line in result.stdout.strip().splitlines() if line.startswith("{")]
+            self.assertEqual([line.get("item_id") for line in lines], ["unrelated-001", "battery-ok-001"])
+            self.assertEqual(lines[1]["stage"], "idea")
+            persisted = [json.loads(line) for line in (root / "state" / "backlog.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual({entry["status"] for entry in persisted}, {"seed"})
 
 
 if __name__ == "__main__":
