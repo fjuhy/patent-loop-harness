@@ -146,9 +146,24 @@ max_budget_usd = 0.0
 auth_check = true
 extra_args = []
 
+# Generic adapter for any agent CLI (pi, cursor-agent, copilot, gemini, aider, ...).
+# Placeholders in command/extra_args: {prompt_file} {output_path} {root} {stage} {prompt}
+# prompt_mode: "stdin" (prompt piped in) | "arg" (prompt appended as last argv) | "file"
+# (no stdin; the CLI reads {prompt_file}). If the CLI can search the web, set
+# web_search_evidence_pattern to a regex its live-search output matches so the
+# fail-closed search gate applies; leave it empty to opt the runner out of that gate.
 [runner.shell]
 command = []
 extra_args = []
+prompt_mode = "stdin"
+web_search_evidence_pattern = ""
+
+# Category-only operation: `patent-loop scout` (or `run --scout-when-empty`)
+# asks the runner for `count` seeds in the target field and keeps only those that
+# pass strict seed validation. auto_when_empty lets `run` refill the backlog itself.
+[scout]
+count = 3
+auto_when_empty = false
 
 [usage_guard]
 enabled = false

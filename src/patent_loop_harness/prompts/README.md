@@ -3,6 +3,7 @@
 각 프롬프트는 하위 LLM runner가 맡을 한 역할만 정의한다. 하네스가 공통 규칙, 백로그 항목, 이전 산출물, 출력 경로를 앞뒤에 붙여 실행한다.
 
 - `00_shared_rules.md`: 모든 단계의 공통 제약
+- `05_seed_scout.md`: target field만 받아 검증 가능한 seed 후보를 JSON으로 생성 (`patent-loop scout`)
 - `10_idea_scout.md`: 아이디어 강구
 - `15_prior_art_gate.md`: 선행기술 기반 kill-or-narrow 게이트
 - `20_draft_writer.md`: 명세서/청구항 초안 작성

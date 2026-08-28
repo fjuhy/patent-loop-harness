@@ -848,6 +848,197 @@ FINAL_VERDICT: DIRECT_OK
             self.assertTrue(old_ok, old_failures)
             self.assertFalse(new_ok, new_failures)
 
+    def test_revise_context_includes_verifier_and_spotcheck_reports(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "reports").mkdir()
+            (root / "reports" / "verification.md").write_text("VERIFY_REJECT_REASON", encoding="utf-8")
+            (root / "reports" / "spotcheck.md").write_text("SPOTCHECK_REJECT_REASON", encoding="utf-8")
+            env = os.environ.copy()
+            env["PATENT_LOOP_ROOT"] = str(root)
+            env["PYTHONPATH"] = str(REPO_ROOT / "src")
+            script = (
+                "from patent_loop_harness.cli import artifact_context\n"
+                "item = {'id': 'x-001', 'status': 'needs_revision',"
+                " 'verification_path': 'reports/verification.md',"
+                " 'external_spotcheck_path': 'reports/spotcheck.md'}\n"
+                "print(artifact_context(item, 'revise'))\n"
+            )
+            result = subprocess.run([sys.executable, "-c", script], env=env, cwd=str(root), text=True, capture_output=True)
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertIn("VERIFY_REJECT_REASON", result.stdout)
+            self.assertIn("SPOTCHECK_REJECT_REASON", result.stdout)
+            self.assertIn("독립 검증 보고서", result.stdout)
+
+    def test_dry_run_does_not_persist_scope_rejection(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            (root / "state").mkdir()
+            item = {
+                "id": "unrelated-seed-001",
+                "title": "Unrelated seed",
+                "domain": "other",
+                "hypothesis": "nothing to do with the configured field",
+                "priority": 100,
+                "status": "seed",
+                "created_at": "2026-01-01T00:00:00+00:00",
+                "updated_at": "2026-01-01T00:00:00+00:00",
+            }
+            (root / "state" / "backlog.jsonl").write_text(json.dumps(item) + "\n", encoding="utf-8")
+
+            dry_run = run_cli(["run", "--dry-run", "--runner", "prompt_only"], root)
+            self.assertEqual(dry_run.returncode, 0, dry_run.stderr + dry_run.stdout)
+            self.assertIn("seed outside target field scope", dry_run.stdout)
+            self.assertIn('"dry_run": true', dry_run.stdout)
+            persisted = json.loads((root / "state" / "backlog.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "seed")
+
+            real_run = run_cli(["run", "--runner", "prompt_only"], root)
+            self.assertEqual(real_run.returncode, 0, real_run.stderr + real_run.stdout)
+            persisted = json.loads((root / "state" / "backlog.jsonl").read_text(encoding="utf-8"))
+            self.assertEqual(persisted["status"], "rejected")
+
+    VALID_SEED_HYPOTHESIS = (
+        "Semiconductor package inspection software commands a warpage-map echo challenge before "
+        "recipe activation, computes a residual signature against the fixture baseline, checks "
+        "calibration version mismatch and replay freshness, and fail-closed excludes the stale recipe "
+        "contribution at the process recipe admission gate."
+    )
+
+    def write_fake_agent(self, root: Path) -> Path:
+        # Stands in for any agent CLI: reads the prompt file, prints a fake search line,
+        # writes the seeds JSON to the output path given on argv.
+        agent = root / "fake_agent.py"
+        agent.write_text(
+            "import json, sys\n"
+            "prompt_file, output_path, stage = sys.argv[1:4]\n"
+            "prompt = open(prompt_file, encoding='utf-8').read()\n"
+            "print('web search: package warpage echo recipe gate')\n"
+            "if stage != 'scout':\n"
+            "    open(output_path, 'w', encoding='utf-8').write('not a valid artifact\\n')\n"
+            "    raise SystemExit(0)\n"
+            "assert 'Requested seed count' in prompt, 'scout prompt missing'\n"
+            "seeds = {'seeds': [\n"
+            "  {'id': 'package-warpage-echo-gate', 'title': 'Warpage echo recipe gate', 'domain': 'advanced packaging inspection',\n"
+            f"   'hypothesis': {self.VALID_SEED_HYPOTHESIS!r}, 'priority': 110, 'closest_art': ['US1', 'US2', 'US3']}},\n"
+            "  {'id': 'weak-seed', 'title': 'Weak seed', 'domain': 'advanced packaging inspection',\n"
+            "   'hypothesis': 'AI optimizes the package process.', 'priority': 100},\n"
+            "]}\n"
+            "open(output_path, 'w', encoding='utf-8').write('```json\\n' + json.dumps(seeds) + '\\n```\\n')\n",
+            encoding="utf-8",
+        )
+        return agent
+
+    def write_shell_runner_config(self, root: Path, agent: Path, search_pattern: str = "") -> None:
+        (root / "config").mkdir(exist_ok=True)
+        (root / "config" / "patent_loop.toml").write_text(
+            f"""
+[field]
+name = "semiconductor packaging control software"
+description = "Semiconductor package inspection software for recipe activation gates and package trace verification."
+domains = ["advanced packaging inspection"]
+
+[runner]
+type = "shell"
+
+[runner.shell]
+command = ["{sys.executable}", "{agent}", "{{prompt_file}}", "{{output_path}}", "{{stage}}"]
+prompt_mode = "file"
+web_search_evidence_pattern = "{search_pattern}"
+
+[scout]
+count = 1
+auto_when_empty = true
+""".strip()
+            + "\n",
+            encoding="utf-8",
+        )
+
+    def test_scout_generates_validated_seeds_through_generic_shell_runner(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = self.write_fake_agent(root)
+            self.write_shell_runner_config(root, agent, search_pattern="^web search:")
+
+            result = run_cli(["scout", "--count", "1"], root)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual(payload["accepted"], ["package-warpage-echo-gate-001"])
+            self.assertEqual([entry["id"] for entry in payload["rejected"]], ["weak-seed-001"])
+            self.assertEqual(payload["failures"], [])
+
+            backlog = [json.loads(line) for line in (root / "state" / "backlog.jsonl").read_text(encoding="utf-8").splitlines()]
+            self.assertEqual(len(backlog), 1)
+            self.assertEqual(backlog[0]["status"], "seed")
+            self.assertEqual(backlog[0]["priority"], 110)
+            self.assertEqual(backlog[0]["notes"][0]["source"], "patent-loop scout command")
+            self.assertEqual(backlog[0]["notes"][0]["closest_art"], ["US1", "US2", "US3"])
+
+    def test_scout_fails_closed_when_shell_runner_shows_no_search(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = self.write_fake_agent(root)
+            self.write_shell_runner_config(root, agent, search_pattern="^LIVE_SEARCH_TOOL:")
+
+            result = run_cli(["scout", "--count", "1"], root)
+            self.assertEqual(result.returncode, 1, result.stderr + result.stdout)
+            payload = json.loads(result.stdout.strip().splitlines()[-1])
+            self.assertEqual(payload["accepted"], [])
+            self.assertTrue(any("web search is required" in failure for failure in payload["failures"]))
+            self.assertFalse((root / "state" / "backlog.jsonl").exists())
+
+    def test_run_scouts_when_backlog_is_empty_and_continues(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            agent = self.write_fake_agent(root)
+            self.write_shell_runner_config(root, agent, search_pattern="^web search:")
+
+            result = run_cli(["run", "--max-items", "1"], root)
+            self.assertEqual(result.returncode, 0, result.stderr + result.stdout)
+            lines = [json.loads(line) for line in result.stdout.strip().splitlines() if line.startswith("{")]
+            self.assertEqual(lines[0]["stage"], "scout")
+            self.assertEqual(lines[0]["accepted"], ["package-warpage-echo-gate-001"])
+            # The same run continues into the idea stage on the freshly scouted seed; the
+            # fake agent writes junk there, so the item ends blocked rather than idle.
+            self.assertEqual(lines[1]["stage"], "idea")
+            self.assertEqual(lines[1]["item_id"], "package-warpage-echo-gate-001")
+            self.assertEqual(lines[1]["status"], "blocked")
+
+            # With nothing runnable left, --no-runner only writes a scout prompt and never
+            # touches the backlog.
+            no_runner = run_cli(["run", "--max-items", "1", "--no-runner"], root)
+            self.assertEqual(no_runner.returncode, 0, no_runner.stderr + no_runner.stdout)
+            payload = json.loads(no_runner.stdout.strip().splitlines()[-1])
+            self.assertEqual((payload["stage"], payload["dry_run"]), ("scout", True))
+            backlog = (root / "state" / "backlog.jsonl").read_text(encoding="utf-8").splitlines()
+            self.assertEqual(len(backlog), 1)
+
+    def test_shell_runner_placeholders_and_prompt_modes(self) -> None:
+        sys.path.insert(0, str(REPO_ROOT / "src"))
+        from patent_loop_harness.cli import ROOT, build_shell_command, web_search_evidence
+
+        with tempfile.TemporaryDirectory() as tmp:
+            fake_runner = Path(tmp) / "runner"
+            fake_runner.write_text("#!/bin/sh\n", encoding="utf-8")
+            prompt_path = Path(tmp) / "task_prompt.md"
+            output_path = Path(tmp) / "out.md"
+            cfg = {"command": [str(fake_runner), "--prompt-file", "{prompt_file}", "--out", "{output_path}", "--stage", "{stage}"]}
+            command = build_shell_command(cfg, prompt="P", prompt_path=prompt_path, output_path=output_path, stage="examine")
+            self.assertEqual(command[2], str(prompt_path))
+            self.assertEqual(command[4], str(output_path))
+            self.assertEqual(command[6], "examine")
+
+            arg_cfg = {"command": [str(fake_runner), "-p"], "prompt_mode": "arg"}
+            self.assertEqual(build_shell_command(arg_cfg, prompt="hello")[-1], "hello")
+            root_cfg = {"command": [str(fake_runner), "--cwd", "{root}"]}
+            self.assertEqual(build_shell_command(root_cfg)[-1], str(ROOT))
+            with self.assertRaises(RuntimeError):
+                build_shell_command({"command": [str(fake_runner)], "prompt_mode": "telepathy"})
+
+        self.assertTrue(web_search_evidence("shell", "no pattern configured", ""))
+        self.assertTrue(web_search_evidence("shell", "[tool] web_search(q=...)", "", {"web_search_evidence_pattern": r"web_search\("}))
+        self.assertFalse(web_search_evidence("shell", "nothing", "", {"web_search_evidence_pattern": r"web_search\("}))
+
 
 if __name__ == "__main__":
     unittest.main()

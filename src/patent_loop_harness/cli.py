@@ -53,10 +53,15 @@ DEFAULT_RUNNER_ENV_ALLOWLIST = [
     "CLAUDE_CONFIG_DIR",
 ]
 RUNNER_TYPES = {"codex", "claude", "shell", "prompt_only"}
+RUNNER_TYPE_ALIASES = {"none": "prompt_only", "custom": "shell", "generic": "shell", "cli": "shell"}
 RUNNER_PROVIDER_KEYS = RUNNER_TYPES
+SHELL_PROMPT_MODES = {"stdin", "arg", "file"}
+SHELL_PLACEHOLDERS = ("{prompt_file}", "{output_path}", "{root}", "{stage}", "{prompt}")
 
 TERMINAL_STATUSES = {"finalized", "finalized_out_of_scope", "rejected", "blocked"}
-SEARCH_REQUIRED_STAGES = {"research", "examine", "redteam", "external_spotcheck"}
+SEARCH_REQUIRED_STAGES = {"scout", "research", "examine", "redteam", "external_spotcheck"}
+SCOUT_PROMPT = "05_seed_scout.md"
+SEED_ID_PATTERN = r"[a-z0-9]+(?:-[a-z0-9]+)*-\d{3}"
 PROMPTS = {
     "idea": "10_idea_scout.md",
     "research": "15_prior_art_gate.md",
@@ -311,7 +316,7 @@ def workspace_path(raw: Any, label: str = "path") -> Path:
 
 def safe_item_id(item: dict[str, Any]) -> str:
     item_id = str(item.get("id", "")).strip()
-    if not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*-\d{3}", item_id):
+    if not re.fullmatch(SEED_ID_PATTERN, item_id):
         raise RuntimeError(f"unsafe backlog item id: {item_id!r}")
     return item_id
 
@@ -856,8 +861,7 @@ def runner_profile(config: dict[str, Any]) -> dict[str, Any]:
         common = {"type": "codex", "enabled": True}
 
     runner_type = str(common.get("type", "codex")).strip().lower()
-    if runner_type == "none":
-        runner_type = "prompt_only"
+    runner_type = RUNNER_TYPE_ALIASES.get(runner_type, runner_type)
     if runner_type not in RUNNER_TYPES:
         raise RuntimeError(f"unsupported runner type: {runner_type}")
 
@@ -983,7 +987,7 @@ def validate_seed_item(item: dict[str, Any], config: dict[str, Any]) -> list[str
         if not item.get(key):
             failures.append(f"seed missing required field: {key}")
     item_id = str(item.get("id", ""))
-    if item_id and not re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*-\d{3}", item_id):
+    if item_id and not re.fullmatch(SEED_ID_PATTERN, item_id):
         failures.append("seed id must be lowercase-kebab-case ending in -NNN")
     hypothesis = str(item.get("hypothesis", ""))
     if len(hypothesis) < 100:
@@ -1033,28 +1037,30 @@ def item_scope_text(item: dict[str, Any]) -> str:
     ).lower()
 
 
-def reject_out_of_scope_seed(item: dict[str, Any], config: dict[str, Any]) -> dict[str, Any] | None:
+def reject_out_of_scope_seed(item: dict[str, Any], config: dict[str, Any], apply: bool = True) -> dict[str, Any] | None:
     if item.get("status") != "seed":
         return None
     field = field_profile(config)
     if is_in_field_scope_text(item_scope_text(item), field):
         return None
-    item["status"] = "rejected"
-    item["updated_at"] = now()
-    item.setdefault("notes", []).append(
-        {
-            "at": now(),
-            "stage": "scope_guard",
-            "decision": "REJECT_OUT_OF_SCOPE",
-            "reason": f"Seed is not directly tied to the configured target field: {field['name']}.",
-        }
-    )
+    if apply:
+        item["status"] = "rejected"
+        item["updated_at"] = now()
+        item.setdefault("notes", []).append(
+            {
+                "at": now(),
+                "stage": "scope_guard",
+                "decision": "REJECT_OUT_OF_SCOPE",
+                "reason": f"Seed is not directly tied to the configured target field: {field['name']}.",
+            }
+        )
     return {
         "ran": False,
         "stage": "idea",
         "item_id": item.get("id"),
-        "status": "rejected",
+        "status": "rejected" if apply else item.get("status"),
         "reason": f"seed outside target field scope: {field['name']}",
+        "dry_run": not apply,
     }
 
 
@@ -1765,8 +1771,19 @@ def is_capacity_error(result: subprocess.CompletedProcess[str]) -> bool:
     return any(term in combined for term in retry_terms)
 
 
-def web_search_evidence(runner_type: str, stdout: str, stderr: str) -> bool:
+def shell_search_pattern(runner_cfg: dict[str, Any] | None) -> str:
+    return str((runner_cfg or {}).get("web_search_evidence_pattern", "") or "").strip()
+
+
+def web_search_evidence(runner_type: str, stdout: str, stderr: str, runner_cfg: dict[str, Any] | None = None) -> bool:
     combined = f"{stdout}\n{stderr}"
+    if runner_type == "shell":
+        # A generic CLI can only be checked against whatever it prints; the operator
+        # supplies the regex that its live search tool emits (see README).
+        pattern = shell_search_pattern(runner_cfg)
+        if not pattern:
+            return True
+        return bool(re.search(pattern, combined, flags=re.IGNORECASE | re.MULTILINE))
     if runner_type == "codex":
         # codex prints a line-anchored `web search: <query>` per live web_search tool call
         return bool(re.search(r"(?im)^\s*web[ _]search\b", combined))
@@ -1786,15 +1803,20 @@ def web_search_requirement_failure(
     if not bool(runner_cfg.get("require_web_search", True)):
         return None
     runner_type = str(runner_cfg.get("type", ""))
-    if runner_type not in {"codex", "claude"} or stage not in SEARCH_REQUIRED_STAGES:
+    if stage not in SEARCH_REQUIRED_STAGES:
         return None
-    if web_search_evidence(runner_type, result.stdout or "", result.stderr or ""):
+    if runner_type == "shell" and not shell_search_pattern(runner_cfg):
         return None
-    hint = (
-        "--search"
-        if runner_type == "codex"
-        else "--allowedTools WebSearch,WebFetch with output_format=json so the search count is visible"
-    )
+    if runner_type not in {"codex", "claude", "shell"}:
+        return None
+    if web_search_evidence(runner_type, result.stdout or "", result.stderr or "", runner_cfg):
+        return None
+    hints = {
+        "codex": "--search",
+        "claude": "--allowedTools WebSearch,WebFetch with output_format=json so the search count is visible",
+        "shell": "the CLI's live search tool; [runner.shell].web_search_evidence_pattern must match its output",
+    }
+    hint = hints[runner_type]
     return (
         f"web search is required for stage '{stage}' but no live web_search activity was "
         f"detected in the {runner_type} runner output; enable web search ({hint}) — the loop "
@@ -1815,11 +1837,15 @@ def artifact_context(item: dict[str, Any], stage: str) -> str:
     elif stage in {"examine", "redteam"}:
         keys = [("draft_path", "평가 대상 초안")]
     elif stage == "revise":
+        # verify/external_spotcheck REJECT also routes here; without their reports the
+        # reviser only sees the (already passed) examiner/redteam verdicts.
         keys = [
             ("draft_path", "거절 대상 초안"),
             ("research_path", "선행기술 Kill-or-Narrow 보고서"),
             ("examiner_path", "심사 보고서"),
             ("redteam_path", "문맥 차단 레드팀 보고서"),
+            ("verification_path", "독립 검증 보고서"),
+            ("external_spotcheck_path", "외부 선행기술 Spot Check 보고서"),
         ]
     elif stage == "finalize":
         keys = [
@@ -1905,7 +1931,7 @@ def latest_note_summary(item: dict[str, Any]) -> str:
 
 
 def duplicate_avoidance_context(item: dict[str, Any], stage: str) -> str:
-    if stage not in {"idea", "research"}:
+    if stage not in {"scout", "idea", "research"}:
         return ""
     current_id = str(item.get("id", ""))
     rows: list[str] = []
@@ -1954,7 +1980,7 @@ def duplicate_avoidance_context(item: dict[str, Any], stage: str) -> str:
 
 
 def seed_preflight_context(stage: str) -> str:
-    if stage not in {"idea", "research"}:
+    if stage not in {"scout", "idea", "research"}:
         return ""
     text = read_text(SEED_PREFLIGHT_PATH).strip()
     if not text:
@@ -1963,7 +1989,7 @@ def seed_preflight_context(stage: str) -> str:
 
 
 def seed_ideation_context(stage: str) -> str:
-    if stage != "idea":
+    if stage not in {"scout", "idea"}:
         return ""
     text = read_text(SEED_IDEATION_PATH).strip()
     if not text:
@@ -2036,23 +2062,24 @@ def context_isolation_block(stage: str) -> str:
 
 def output_path_for(item: dict[str, Any], stage: str) -> Path:
     item_id = safe_item_id(item)
-    run_id = f"{slug_time()}_{item_id}_{stage}"
+    stamp = slug_time()
+    run_id = f"{stamp}_{item_id}_{stage}"
     if stage == "finalize":
-        return workspace_path(ROOT / "final" / f"{item_id}_final_{slug_time()}.md", label="final output path")
+        return workspace_path(ROOT / "final" / f"{item_id}_final_{stamp}.md", label="final output path")
     if stage == "verify":
-        return workspace_path(ROOT / "reports" / f"{item_id}_verification_{slug_time()}.md", label="verification output path")
+        return workspace_path(ROOT / "reports" / f"{item_id}_verification_{stamp}.md", label="verification output path")
     if stage == "external_spotcheck":
-        return workspace_path(ROOT / "reports" / f"{item_id}_external_spotcheck_{slug_time()}.md", label="external spotcheck output path")
+        return workspace_path(ROOT / "reports" / f"{item_id}_external_spotcheck_{stamp}.md", label="external spotcheck output path")
     if stage == "visualize":
-        return workspace_path(ROOT / "visuals" / f"{item_id}_overview_{slug_time()}.html", label="visual output path")
+        return workspace_path(ROOT / "visuals" / f"{item_id}_overview_{stamp}.html", label="visual output path")
     if stage == "visual_revise":
         return workspace_path(
-            ROOT / "visuals" / f"{item_id}_overview_revised_{slug_time()}.html",
+            ROOT / "visuals" / f"{item_id}_overview_revised_{stamp}.html",
             label="revised visual output path",
         )
     if stage == "visual_review":
         return workspace_path(
-            ROOT / "reports" / f"{item_id}_visual_review_{slug_time()}.md",
+            ROOT / "reports" / f"{item_id}_visual_review_{stamp}.md",
             label="visual review output path",
         )
     filename = {
@@ -2241,15 +2268,50 @@ def claude_auth_problem(runner_cfg: dict[str, Any]) -> str | None:
     return f"claude is not authenticated; run `claude auth login`{suffix}"
 
 
-def build_shell_command(runner_cfg: dict[str, Any]) -> list[str]:
+def shell_prompt_mode(runner_cfg: dict[str, Any]) -> str:
+    mode = str(runner_cfg.get("prompt_mode", "stdin")).strip().lower() or "stdin"
+    if mode not in SHELL_PROMPT_MODES:
+        raise RuntimeError(f"[runner.shell].prompt_mode must be one of {sorted(SHELL_PROMPT_MODES)}: {mode}")
+    return mode
+
+
+def build_shell_command(
+    runner_cfg: dict[str, Any],
+    prompt: str = "",
+    prompt_path: Path | None = None,
+    output_path: Path | None = None,
+    stage: str = "",
+) -> list[str]:
+    """Wire any agent CLI (pi, cursor-agent, copilot, gemini, ...) from config only.
+
+    Placeholders in `command`/`extra_args`: {prompt_file} {output_path} {root} {stage} {prompt}.
+    prompt_mode: stdin (default) | arg (prompt appended as the last argument) | file
+    (no stdin; the CLI reads {prompt_file}).
+    """
     raw = runner_cfg.get("command")
     if not raw:
         raise RuntimeError("shell runner requires [runner.shell].command")
-    command = runner_argv(raw)
+    command = runner_argv(raw) + runner_argv(runner_cfg.get("extra_args"))
     if not command:
         raise RuntimeError("shell runner command is empty")
+    mode = shell_prompt_mode(runner_cfg)
+    values = {
+        "{prompt_file}": str(prompt_path or ""),
+        "{output_path}": str(output_path or ""),
+        "{root}": str(ROOT),
+        "{stage}": stage,
+        "{prompt}": prompt,
+    }
+    substituted: list[str] = []
+    for part in command:
+        for placeholder, value in values.items():
+            if placeholder in part:
+                part = part.replace(placeholder, value)
+        substituted.append(part)
+    command = substituted
     command[0] = executable_path(command[0], "shell runner")
-    command.extend(runner_argv(runner_cfg.get("extra_args")))
+    if mode == "arg":
+        command.append(prompt)
     return command
 
 
@@ -2264,23 +2326,37 @@ def runner_stdout_message(runner_type: str, result: subprocess.CompletedProcess[
     return result.stdout
 
 
-def run_agent(prompt: str, output_path: Path, config: dict[str, Any], stage: str, item_id: str) -> subprocess.CompletedProcess[str]:
+def run_agent(
+    prompt: str,
+    output_path: Path,
+    config: dict[str, Any],
+    stage: str,
+    item_id: str,
+    prompt_path: Path | None = None,
+) -> subprocess.CompletedProcess[str]:
     runner_cfg = runner_profile(config)
     runner_type = str(runner_cfg["type"])
     if runner_type == "prompt_only" or not bool(runner_cfg.get("enabled", True)):
         return subprocess.CompletedProcess(args=[runner_type], returncode=0, stdout="", stderr="")
 
     output_path.parent.mkdir(parents=True, exist_ok=True)
-    last_message = ROOT / "logs" / f"{runner_type}-last-{item_id}-{stage}-{slug_time()}.md"
-    stdout_log = ROOT / "logs" / f"{runner_type}-{item_id}-{stage}-{slug_time()}.out.log"
-    stderr_log = ROOT / "logs" / f"{runner_type}-{item_id}-{stage}-{slug_time()}.err.log"
+    stamp = slug_time()
+    last_message = ROOT / "logs" / f"{runner_type}-last-{item_id}-{stage}-{stamp}.md"
+    stdout_log = ROOT / "logs" / f"{runner_type}-{item_id}-{stage}-{stamp}.out.log"
+    stderr_log = ROOT / "logs" / f"{runner_type}-{item_id}-{stage}-{stamp}.err.log"
+    stdin_text: str | None = prompt
 
     if runner_type == "codex":
         command = build_codex_command(runner_cfg, last_message)
     elif runner_type == "claude":
         command = build_claude_command(runner_cfg)
     elif runner_type == "shell":
-        command = build_shell_command(runner_cfg)
+        if prompt_path is None:
+            prompt_path = ROOT / "logs" / f"{runner_type}-prompt-{item_id}-{stage}-{stamp}.md"
+            write_text(prompt_path, prompt)
+        command = build_shell_command(runner_cfg, prompt=prompt, prompt_path=prompt_path, output_path=output_path, stage=stage)
+        if shell_prompt_mode(runner_cfg) != "stdin":
+            stdin_text = None
     else:
         raise RuntimeError(f"unsupported runner type: {runner_type}")
 
@@ -2294,7 +2370,7 @@ def run_agent(prompt: str, output_path: Path, config: dict[str, Any], stage: str
         try:
             result = subprocess.run(
                 command,
-                input=prompt,
+                input=stdin_text,
                 text=True,
                 capture_output=True,
                 timeout=int(runner_cfg.get("timeout_seconds", 3600)),
@@ -2567,7 +2643,7 @@ def run_one(item: dict[str, Any], config: dict[str, Any], dry_run: bool = False,
         if attempt:
             prompt = build_prompt(item, stage, output_path, config, repair_notes=failures)
             write_text(prompt_path, prompt)
-        result = run_agent(prompt, output_path, config, stage, item["id"])
+        result = run_agent(prompt, output_path, config, stage, item["id"], prompt_path=prompt_path)
         if result.returncode != 0:
             failures = [f"{runner_type} runner returned {result.returncode}"]
         else:
@@ -2606,7 +2682,7 @@ def slugify_id(text: str) -> str:
 
 def next_unique_seed_id(base: str, items: list[dict[str, Any]]) -> str:
     existing = {str(item.get("id", "")) for item in items}
-    if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*-\d{3}", base) and base not in existing:
+    if re.fullmatch(SEED_ID_PATTERN, base) and base not in existing:
         return base
     base = re.sub(r"-\d{3}$", "", base)
     for index in range(1, 1000):
@@ -2616,13 +2692,235 @@ def next_unique_seed_id(base: str, items: list[dict[str, Any]]) -> str:
     raise RuntimeError(f"Could not allocate unique seed id for base={base}")
 
 
+def scout_config(config: dict[str, Any]) -> dict[str, Any]:
+    cfg = config.get("scout", {})
+    return cfg if isinstance(cfg, dict) else {}
+
+
+def build_scout_prompt(config: dict[str, Any], output_path: Path, count: int, repair_notes: list[str] | None = None) -> str:
+    shared = read_prompt("00_shared_rules.md")
+    role = read_prompt(SCOUT_PROMPT)
+    guardrails = read_text(GUARDRAILS_PATH)[-8000:]
+    pseudo_item = {"id": "", "status": "seed"}
+    duplicate_context = duplicate_avoidance_context(pseudo_item, "scout")
+    ideation_context = seed_ideation_context("scout")
+    preflight_context = seed_preflight_context("scout")
+    field = field_profile(config)
+    repair_block = ""
+    if repair_notes:
+        repair_block = "\n\n## 이전 검증 실패\n\n" + "\n".join(f"- {note}" for note in repair_notes)
+    return "\n\n".join(
+        [
+            'Start the "Patent Generation Loop" seed scouting stage.',
+            f"Workspace root: {ROOT}\nStage: scout\nOutput path: {output_path}\nRequested seed count: {count}",
+            "You must write the seed JSON to the exact output path above.\n"
+            "Work only inside the workspace unless you are reading public references.\n"
+            "After writing the file, give a short status summary.",
+            shared,
+            "# Current Guardrails\n\n" + (guardrails if guardrails.strip() else "No guardrail history recorded."),
+            duplicate_context,
+            ideation_context,
+            preflight_context,
+            "# Role Instructions\n\n" + role,
+            field_prompt_block(config),
+            "# Seed Acceptance Rules\n\n"
+            f"- Target field: {field['name']}\n"
+            f"- Allowed domains: {', '.join(field['domains']) or field['name']}\n"
+            f"- Required scope terms (at least one in the hypothesis): {', '.join(listify(field.get('scope_terms'))[:30]) or 'none'}\n"
+            f"- Forbidden high-risk terms: {', '.join(listify(field.get('high_risk_terms'))) or 'none'}\n"
+            "- Each seed must match at least 3 of these feature groups: "
+            + ", ".join(f"{name} ({', '.join(terms[:6])}...)" for name, terms in SEED_FEATURE_GROUPS.items())
+            + "\n- The hypothesis must contain an explicit invalidity trigger: "
+            + ", ".join(HARD_FAIL_CLOSED_TERMS)
+            + repair_block,
+            f"# Exit Condition\n\nA JSON file with at least {count} seeds exists at `{output_path}` and every seed satisfies the acceptance rules.",
+        ]
+    ).strip() + "\n"
+
+
+def parse_seed_output(text: str) -> list[dict[str, Any]]:
+    body = text.strip()
+    fence = re.search(r"```(?:json)?\s*(.*?)```", body, flags=re.DOTALL)
+    if fence:
+        body = fence.group(1).strip()
+    if not body:
+        raise RuntimeError("scout output is empty")
+    try:
+        data = json.loads(body)
+    except json.JSONDecodeError as exc:
+        start, end = body.find("{"), body.rfind("}")
+        if start < 0 or end <= start:
+            raise RuntimeError(f"scout output is not JSON: {exc}") from exc
+        try:
+            data = json.loads(body[start : end + 1])
+        except json.JSONDecodeError as inner:
+            raise RuntimeError(f"scout output is not JSON: {inner}") from inner
+    seeds = data.get("seeds") if isinstance(data, dict) else data
+    if not isinstance(seeds, list):
+        raise RuntimeError("scout output must be a JSON object with a `seeds` array")
+    return [seed for seed in seeds if isinstance(seed, dict)]
+
+
+def seed_item_from_scout(raw: dict[str, Any], field: dict[str, Any], items: list[dict[str, Any]]) -> dict[str, Any]:
+    title = str(raw.get("title", "")).strip()
+    raw_id = str(raw.get("id", "") or title or field["name"]).strip()
+    base_id = raw_id if re.fullmatch(SEED_ID_PATTERN, raw_id) else slugify_id(raw_id)
+    item_id = next_unique_seed_id(base_id, items)
+    domain = str(raw.get("domain", "") or (field["domains"][0] if field["domains"] else field["name"])).strip()
+    try:
+        priority = int(raw.get("priority", 100))
+    except (TypeError, ValueError):
+        priority = 100
+    note: dict[str, Any] = {"at": now(), "stage": "seed", "field": field["name"], "source": "patent-loop scout command"}
+    for key in ["closest_art", "uncovered_gap", "source_method", "search_queries"]:
+        if raw.get(key):
+            note[key] = raw[key]
+    return {
+        "id": item_id,
+        "title": title,
+        "domain": domain,
+        "hypothesis": str(raw.get("hypothesis", "")).strip(),
+        "priority": priority,
+        "status": "seed",
+        "created_at": now(),
+        "updated_at": now(),
+        "notes": [note],
+    }
+
+
+def ingest_scout_seeds(
+    raw_seeds: list[dict[str, Any]], config: dict[str, Any], items: list[dict[str, Any]]
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    field = field_profile(config)
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for raw in raw_seeds:
+        item = seed_item_from_scout(raw, field, items + accepted)
+        failures = validate_seed_item(item, config)
+        if failures:
+            rejected.append({"id": item["id"], "title": item["title"], "validation_failures": failures})
+            continue
+        accepted.append(item)
+    return accepted, rejected
+
+
+def run_scout(config: dict[str, Any], count: int, dry_run: bool = False, no_runner: bool = False) -> dict[str, Any]:
+    ensure_layout()
+    runner_cfg = runner_profile(config)
+    runner_type = str(runner_cfg["type"])
+    output_path = workspace_path(ROOT / "work" / f"{slug_time()}_scout" / "seeds.json", label="scout output path")
+    prompt_path = output_path.parent / "task_prompt.md"
+    prompt = build_scout_prompt(config, output_path, count)
+    write_text(prompt_path, prompt)
+
+    if dry_run or no_runner or runner_type == "prompt_only" or not bool(runner_cfg.get("enabled", True)):
+        append_jsonl(
+            METRICS_PATH,
+            {
+                "at": now(),
+                "event": "dry_run" if dry_run else "prompt_only",
+                "runner": runner_type,
+                "stage": "scout",
+                "requested": count,
+                "prompt_path": str(prompt_path.relative_to(ROOT)),
+                "output_path": str(output_path.relative_to(ROOT)),
+            },
+        )
+        return {"ran": True, "stage": "scout", "requested": count, "prompt_path": prompt_path, "output_path": output_path, "dry_run": True}
+
+    guard = usage_guard_for_item({"id": "scout", "status": "seed"}, config)
+    if guard:
+        guard["stage"] = "scout"
+        return guard
+
+    repair_attempts = int(runner_cfg.get("repair_attempts", 1))
+    failures: list[str] = []
+    accepted: list[dict[str, Any]] = []
+    rejected: list[dict[str, Any]] = []
+    for attempt in range(repair_attempts + 1):
+        if attempt:
+            prompt = build_scout_prompt(config, output_path, count, repair_notes=failures)
+            write_text(prompt_path, prompt)
+        result = run_agent(prompt, output_path, config, "scout", "scout", prompt_path=prompt_path)
+        if result.returncode != 0:
+            failures = [f"{runner_type} runner returned {result.returncode}"]
+            continue
+        search_failure = web_search_requirement_failure("scout", runner_cfg, result)
+        if search_failure:
+            failures = [search_failure]
+            append_jsonl(METRICS_PATH, {"at": now(), "event": "web_search_missing", "runner": runner_type, "stage": "scout", "attempt": attempt + 1})
+            continue
+        try:
+            raw_seeds = parse_seed_output(read_text(output_path))
+        except RuntimeError as exc:
+            failures = [str(exc)]
+            continue
+        items = load_backlog()
+        accepted, rejected = ingest_scout_seeds(raw_seeds, config, items)
+        if len(accepted) >= count:
+            break
+        failures = [f"only {len(accepted)}/{count} seeds passed validation"] + [
+            f"{entry['id']}: {'; '.join(entry['validation_failures'])}" for entry in rejected[:8]
+        ]
+
+    items = load_backlog()
+    if accepted:
+        items.extend(accepted)
+        save_backlog(items)
+    append_jsonl(
+        METRICS_PATH,
+        {
+            "at": now(),
+            "event": "scout",
+            "runner": runner_type,
+            "stage": "scout",
+            "requested": count,
+            "accepted": len(accepted),
+            "rejected": len(rejected),
+            "output_path": str(output_path.relative_to(ROOT)),
+        },
+    )
+    if not accepted:
+        record_guardrail("scout", {"id": "scout"}, failures or ["no seeds accepted"])
+    return {
+        "ran": True,
+        "stage": "scout",
+        "requested": count,
+        "accepted": [item["id"] for item in accepted],
+        "rejected": rejected,
+        "output_path": output_path,
+        "failures": failures if len(accepted) < count else [],
+    }
+
+
+def printable_result(result: dict[str, Any]) -> dict[str, Any]:
+    printable = dict(result)
+    for key in ["prompt_path", "output_path"]:
+        if isinstance(printable.get(key), Path):
+            printable[key] = str(printable[key].relative_to(ROOT))
+    return printable
+
+
+def cmd_scout(args: argparse.Namespace) -> int:
+    config = invocation_config(args)
+    count = args.count if args.count is not None else int(scout_config(config).get("count", 3))
+    if count < 1:
+        raise RuntimeError("--count must be at least 1")
+    with LoopLock(LOCK_PATH):
+        result = run_scout(config, count, dry_run=args.dry_run, no_runner=args.no_runner)
+    print(json.dumps(printable_result(result), ensure_ascii=False, sort_keys=True))
+    if result.get("dry_run") or result.get("accepted"):
+        return 0
+    return 1
+
+
 def cmd_seed(args: argparse.Namespace) -> int:
     ensure_layout()
     config = invocation_config(args)
     field = field_profile(config)
     items = load_backlog()
     raw_base_id = str(args.id or args.title or field["name"])
-    base_id = raw_base_id if re.fullmatch(r"[a-z0-9]+(?:-[a-z0-9]+)*-\d{3}", raw_base_id) else slugify_id(raw_base_id)
+    base_id = raw_base_id if re.fullmatch(SEED_ID_PATTERN, raw_base_id) else slugify_id(raw_base_id)
     item_id = next_unique_seed_id(base_id, items)
     domain = str(args.domain or (field["domains"][0] if field["domains"] else field["name"]))
     item = {
@@ -2690,19 +2988,32 @@ def cmd_run(args: argparse.Namespace) -> int:
             print(json.dumps({"ran": False, "mode": args.mode, "reason": skip_reason}, ensure_ascii=False, sort_keys=True))
             return 0
     max_items = args.max_items if args.max_items is not None else int(config["loop"].get("max_items_per_run", 1))
+    scout_cfg = scout_config(config)
+    auto_scout = bool(getattr(args, "scout_when_empty", False)) or bool(scout_cfg.get("auto_when_empty", False))
+    scout_count = int(scout_cfg.get("count", 3))
     with LoopLock(LOCK_PATH):
         items = load_backlog()
-        if not items:
-            print("No backlog items.")
-            return 0
         results = []
+        scouted = False
         for _ in range(max_items):
             item = next_item(items, stage_only=args.stage_only, field=field)
+            if item is None and auto_scout and not scouted and not args.dry_run and args.stage_only in {None, "idea"}:
+                # Category-only operation: refill the backlog from the target field,
+                # then keep going in the same run.
+                scouted = True
+                scout_result = run_scout(config, scout_count, no_runner=args.no_runner)
+                results.append(scout_result)
+                if not scout_result.get("accepted"):
+                    break
+                items = load_backlog()
+                item = next_item(items, stage_only=args.stage_only, field=field)
             if item is None:
                 break
-            scope_result = reject_out_of_scope_seed(item, config)
+            scope_result = reject_out_of_scope_seed(item, config, apply=not args.dry_run)
             if scope_result:
                 results.append(scope_result)
+                if args.dry_run:
+                    break
                 save_backlog(items)
                 continue
             if not args.ignore_usage_guard:
@@ -2752,11 +3063,7 @@ def cmd_run(args: argparse.Namespace) -> int:
                 },
             )
         for result in results:
-            printable = dict(result)
-            for key in ["prompt_path", "output_path"]:
-                if isinstance(printable.get(key), Path):
-                    printable[key] = str(printable[key].relative_to(ROOT))
-            print(json.dumps(printable, ensure_ascii=False, sort_keys=True))
+            print(json.dumps(printable_result(result), ensure_ascii=False, sort_keys=True))
     return 0
 
 
@@ -2803,7 +3110,7 @@ def heartbeat_skip_reason(config: dict[str, Any]) -> str | None:
     state = load_json(HEARTBEAT_STATE_PATH, {})
     last = state.get("lastChecks", {}).get("patent_loop")
     min_interval = int(loop_cfg.get("heartbeat_min_interval_minutes", 45)) * 60
-    if isinstance(last, int) and time.time() - last < min_interval:
+    if isinstance(last, (int, float)) and not isinstance(last, bool) and time.time() - last < min_interval:
         remaining = int((min_interval - (time.time() - last)) / 60) + 1
         return f"last patent loop run was too recent; wait about {remaining} minutes"
 
@@ -2863,7 +3170,9 @@ def runner_smoke_check(config: dict[str, Any], runner_cfg: dict[str, Any]) -> st
     runner_type = str(runner_cfg["type"])
     if runner_type == "prompt_only":
         return None
-    require_search = bool(runner_cfg.get("require_web_search", True)) and runner_type in {"codex", "claude"}
+    require_search = bool(runner_cfg.get("require_web_search", True)) and (
+        runner_type in {"codex", "claude"} or (runner_type == "shell" and bool(shell_search_pattern(runner_cfg)))
+    )
     output_path = ROOT / "state" / f"runner-smoke-{runner_type}-{slug_time()}.txt"
     if require_search:
         prompt = (
@@ -2886,11 +3195,12 @@ def runner_smoke_check(config: dict[str, Any], runner_cfg: dict[str, Any]) -> st
         return f"{runner_type} smoke check did not write output: {exc}"
     if text != "RUNNER_SMOKE_OK":
         return f"{runner_type} smoke check wrote unexpected output: {text[:120]!r}"
-    if require_search and not web_search_evidence(runner_type, result.stdout or "", result.stderr or ""):
+    if require_search and not web_search_evidence(runner_type, result.stdout or "", result.stderr or "", runner_cfg):
         return (
             f"{runner_type} smoke check could not confirm live web search; web search is "
             "required by default. Enable it (codex: --search / claude: --allowedTools "
-            "WebSearch,WebFetch with a tool-use-visible output_format) or set "
+            "WebSearch,WebFetch with a tool-use-visible output_format / shell: a "
+            "web_search_evidence_pattern that matches the CLI's search output) or set "
             "[runner].require_web_search = false to override."
         )
     try:
@@ -2906,7 +3216,7 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     runner_cfg: dict[str, Any] | None = None
     if sys.version_info < (3, 11):
         problems.append("Python 3.11+ required")
-    for name in ["00_shared_rules.md", *PROMPTS.values()]:
+    for name in ["00_shared_rules.md", SCOUT_PROMPT, *PROMPTS.values()]:
         try:
             read_prompt(name)
         except FileNotFoundError:
@@ -2976,7 +3286,20 @@ def build_parser() -> argparse.ArgumentParser:
     run.add_argument("--dry-run", action="store_true")
     run.add_argument("--no-codex", "--no-runner", dest="no_runner", action="store_true", help="write task prompt but do not invoke an LLM runner")
     run.add_argument("--force", action="store_true", help="ignore heartbeat cadence checks")
+    run.add_argument(
+        "--scout-when-empty",
+        action="store_true",
+        help="when no runnable backlog item exists, generate seeds for the target field first (also [scout].auto_when_empty)",
+    )
     run.set_defaults(func=cmd_run)
+
+    scout = sub.add_parser("scout", help="Generate validated seed backlog items for the target field")
+    add_field_arguments(scout)
+    add_runner_arguments(scout)
+    scout.add_argument("--count", type=int, default=None, help="seeds to request; defaults to [scout].count")
+    scout.add_argument("--dry-run", action="store_true", help="write the scout prompt without invoking a runner")
+    scout.add_argument("--no-runner", dest="no_runner", action="store_true", help="alias of --dry-run for scripting symmetry with run")
+    scout.set_defaults(func=cmd_scout)
 
     status = sub.add_parser("status", help="Show loop status")
     add_field_arguments(status)

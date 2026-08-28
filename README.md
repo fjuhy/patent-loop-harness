@@ -102,6 +102,35 @@ By default, the harness uses the `codex` runner for backward compatibility and
 lets the installed CLI choose its default model. Set `[runner].model` in a
 private workbench config when you need a pinned model.
 
+## Category In, Drafts Out
+
+The intended operating mode is: give the harness a **category** (the target
+field) and let it scout ideas, gate them against prior art, draft, examine, and
+red-team them without hand-written seeds.
+
+```bash
+# 1. Point it at a field and let it fill the backlog with validated seeds
+patent-loop scout --count 3 \
+  --field "semiconductor packaging control software" \
+  --field-domain "advanced packaging inspection"
+
+# 2. Run the loop; with --scout-when-empty it refills the backlog by itself
+patent-loop run --max-items 5 --scout-when-empty --field "semiconductor packaging control software"
+```
+
+`scout` asks the runner (with live web search) for `--count` seeds in the target
+field, following `prompts/05_seed_scout.md`: narrow micro-system, closest
+prior-art cluster first, commanded challenge → residual → specific gate →
+fail-closed trigger. Every returned seed goes through the same strict validation
+as `patent-loop seed` (length, feature groups, invalidity trigger, scope terms,
+high-risk terms); only passing seeds enter `state/backlog.jsonl`, rejected ones
+are reported with their failures, and a shortfall triggers one repair attempt
+with those failures fed back to the runner. Set `[scout].count` and
+`[scout].auto_when_empty = true` to make plain `patent-loop run` self-refilling.
+`state/seed_ideation_strategy.md` and `state/seed_prior_art_preflight.md`, when
+present in the workbench, are injected into the scout prompt, as is the
+duplicate-avoidance table of existing seeds and outcomes.
+
 ## Agent Skill
 
 This repository also ships an Agent Skills-compatible wrapper at
@@ -120,8 +149,55 @@ The harness has a pluggable runner layer:
 
 - `codex`: runs `codex exec`
 - `claude`: runs Claude Code in print mode with `claude -p`
-- `shell`: sends the prompt to any command on stdin
+- `shell` (aliases `custom`, `generic`, `cli`): wires **any** agent CLI from config —
+  pi, cursor-agent, copilot, gemini, aider, a wrapper script, …
 - `prompt_only`: writes prompts without invoking an LLM
+
+### Plugging in your own agent CLI
+
+The harness needs three things from a runner: it must receive the task prompt, it
+must write the artifact to the output path named in that prompt, and — for the
+prior-art stages — it must prove it searched the web. `shell` covers all three
+without code changes:
+
+```toml
+[runner]
+type = "shell"
+
+[runner.shell]
+# Placeholders: {prompt_file} {output_path} {root} {stage} {prompt}
+command = ["cursor-agent", "-p", "--output-format", "text", "--workdir", "{root}"]
+prompt_mode = "stdin"            # stdin | arg (prompt appended as last argv) | file (CLI reads {prompt_file})
+web_search_evidence_pattern = "" # regex the CLI prints when it really searched; "" opts out of the search gate
+```
+
+Some shapes that work as-is or with one line changed:
+
+```toml
+# pi / any CLI that takes the prompt as an argument
+command = ["pi", "--yolo", "--print"]
+prompt_mode = "arg"
+
+# GitHub Copilot CLI
+command = ["copilot", "--allow-all-tools", "-p"]
+prompt_mode = "arg"
+
+# Gemini CLI, prompt on stdin, search evidence from its tool log
+command = ["gemini", "--yolo"]
+prompt_mode = "stdin"
+web_search_evidence_pattern = "GoogleSearch|google_web_search"
+
+# Your own wrapper that reads a prompt file and writes the artifact itself
+command = ["python3", "tools/my_agent.py", "--prompt", "{prompt_file}", "--out", "{output_path}", "--stage", "{stage}"]
+prompt_mode = "file"
+```
+
+If the CLI prints its result instead of writing the file, the harness copies stdout
+to the output path. When `web_search_evidence_pattern` is set, `scout` / `research`
+/ `examine` / `redteam` / `external_spotcheck` fail closed unless the pattern matches
+the CLI's output; `patent-loop doctor --runner-smoke` checks the whole wiring live.
+Runner flags change often, so treat the snippets above as starting points and
+adjust them to the CLI version you have installed.
 
 Select a runner in config:
 

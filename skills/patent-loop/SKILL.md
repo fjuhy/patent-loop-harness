@@ -66,13 +66,25 @@ Validate known artifacts:
 patent-loop validate
 ```
 
-Add a seed with a narrow hypothesis:
+Let the harness scout seeds for a category instead of writing them by hand
+(live web search required; only seeds passing strict validation enter the backlog):
+
+```bash
+patent-loop scout --count 3 --field "semiconductor packaging control software"
+patent-loop run --max-items 1 --scout-when-empty
+```
+
+Add a single seed with a narrow hypothesis:
 
 ```bash
 patent-loop seed \
   --title "Short descriptive title" \
   --hypothesis "A narrow technical causal-chain hypothesis tied to the configured field."
 ```
+
+Wire a different agent CLI (pi, cursor-agent, copilot, gemini, ...) via the
+generic `shell` runner in `config/patent_loop.toml`; see the README's
+"Plugging in your own agent CLI" section for placeholders and `prompt_mode`.
 
 Override the research field at runtime:
 

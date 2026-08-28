@@ -16,5 +16,20 @@ description = "Semiconductor package inspection/verification software tied to re
 type = "codex"
 model = "gpt-5.5"
 
+# Or plug in any agent CLI instead of codex/claude. Placeholders:
+# {prompt_file} {output_path} {root} {stage} {prompt}
+# [runner]
+# type = "shell"
+# [runner.shell]
+# command = ["cursor-agent", "-p", "--workdir", "{root}"]
+# prompt_mode = "stdin"            # stdin | arg | file
+# web_search_evidence_pattern = "" # regex the CLI prints when it searched; "" skips the search gate
+
+# Category-only mode: `patent-loop scout` fills the backlog with validated seeds,
+# and auto_when_empty lets `patent-loop run` refill it by itself.
+[scout]
+count = 3
+auto_when_empty = false
+
 [quality]
 min_grade_for_pass = "B+"
