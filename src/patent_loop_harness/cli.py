@@ -3311,10 +3311,99 @@ def cmd_doctor(args: argparse.Namespace) -> int:
     return 0
 
 
+WORKBENCH_GITIGNORE = """# patent-loop private workbench
+logs/*.log
+logs/*.jsonl
+.env
+.env.*
+*.pem
+*.key
+__pycache__/
+state/loop.lock
+state/heartbeat-state.json
+state/*_usage.json
+state/runner-smoke-*.txt
+work/**/.tmp
+**/task_prompt.md
+"""
+
+
+def toml_string(value: str) -> str:
+    return json.dumps(value, ensure_ascii=False)
+
+
+def render_init_config(args: argparse.Namespace) -> str:
+    lines = [
+        "# patent-loop workbench config (created by `patent-loop init`).",
+        "# Only keys that differ from the bundled default_config.toml are needed.",
+        "",
+    ]
+    field = str(args.field or "").strip()
+    description = str(args.field_description or "").strip()
+    domains = [d.strip() for raw in args.field_domain for d in str(raw).split(",") if d.strip()]
+    if field:
+        lines.append("[field]")
+        lines.append(f"name = {toml_string(field)}")
+        if description:
+            lines.append(f"description = {toml_string(description)}")
+        if domains:
+            lines.append("domains = [" + ", ".join(toml_string(d) for d in domains) + "]")
+    else:
+        lines += [
+            "# No [field] set: the bundled default field (battery-industry software) applies.",
+            "# Set your own target field, for example:",
+            "# [field]",
+            '# name = "medical imaging software"',
+            '# description = "Software tied to image acquisition, reconstruction, and QC gates."',
+        ]
+    lines += ["", "[runner]", f"type = {toml_string(args.runner)}"]
+    if args.model:
+        lines.append(f"model = {toml_string(args.model)}")
+    else:
+        lines.append("# model = \"...\"  # omit to let the runner CLI choose its default model")
+    lines += ["", "[scout]", "count = 3", "auto_when_empty = false", ""]
+    return "\n".join(lines)
+
+
+def cmd_init(args: argparse.Namespace) -> int:
+    ensure_layout()
+    written: list[str] = []
+    kept: list[str] = []
+    targets = [
+        (CONFIG_PATH, render_init_config(args)),
+        (ROOT / ".gitignore", WORKBENCH_GITIGNORE),
+    ]
+    for path, text in targets:
+        if path.exists() and not args.force:
+            kept.append(str(path.relative_to(ROOT)))
+            continue
+        write_text(path, text)
+        written.append(str(path.relative_to(ROOT)))
+    print("Workbench initialized")
+    print(f"- root: {ROOT}")
+    if written:
+        print(f"- written: {', '.join(written)}")
+    if kept:
+        print(f"- kept existing (use --force to overwrite): {', '.join(kept)}")
+    if not str(args.field or "").strip() and not kept:
+        print("- note: no --field given; the bundled battery-industry field applies until you edit config/patent_loop.toml")
+    print("Next: patent-loop doctor && patent-loop scout --count 1")
+    return 0
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Autonomous patent generation loop harness")
     parser.add_argument("--version", action="version", version=f"patent-loop-harness {PACKAGE_VERSION}")
     sub = parser.add_subparsers(dest="command", required=True)
+
+    init = sub.add_parser("init", help="Create a private workbench (layout, config, .gitignore) in the current directory")
+    init.add_argument("--field", default="", help="target patent research field (recommended)")
+    init.add_argument("--field-description", default="", help="one-sentence description of the field boundary")
+    init.add_argument("--field-domain", action="append", default=[], help="narrow domain within --field; repeat or comma-separate")
+    init.add_argument("--runner", choices=sorted(RUNNER_TYPES), default="codex", help="LLM runner (default: codex)")
+    init.add_argument("--model", default="", help="pin a runner model; omit to use the runner CLI default")
+    init.add_argument("--force", action="store_true", help="overwrite an existing config/patent_loop.toml and .gitignore")
+    init.set_defaults(func=cmd_init)
 
     seed = sub.add_parser("seed", help="Append a seed backlog item")
     add_field_arguments(seed)

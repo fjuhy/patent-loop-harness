@@ -1115,6 +1115,50 @@ auto_when_empty = true
             persisted = [json.loads(line) for line in (root / "state" / "backlog.jsonl").read_text(encoding="utf-8").splitlines()]
             self.assertEqual({entry["status"] for entry in persisted}, {"seed"})
 
+    def test_init_creates_workbench_with_custom_field_and_keeps_existing(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            init = run_cli(
+                [
+                    "init",
+                    "--field",
+                    "medical imaging software",
+                    "--field-description",
+                    "Software tied to image acquisition, reconstruction, and QC gates.",
+                    "--field-domain",
+                    "CT reconstruction, MRI QC",
+                    "--runner",
+                    "claude",
+                ],
+                root,
+            )
+            self.assertEqual(init.returncode, 0, init.stderr + init.stdout)
+            for rel in ["config", "state", "work", "final", "reports", "visuals", "logs", "memory"]:
+                self.assertTrue((root / rel).is_dir(), rel)
+            self.assertTrue((root / ".gitignore").exists())
+            status = run_cli(["status"], root)
+            self.assertEqual(status.returncode, 0, status.stderr + status.stdout)
+            self.assertIn("field: medical imaging software", status.stdout)
+            self.assertIn("runner: claude", status.stdout)
+
+            config_text = (root / "config" / "patent_loop.toml").read_text(encoding="utf-8")
+            again = run_cli(["init", "--field", "other field"], root)
+            self.assertEqual(again.returncode, 0, again.stderr + again.stdout)
+            self.assertIn("kept existing", again.stdout)
+            self.assertEqual((root / "config" / "patent_loop.toml").read_text(encoding="utf-8"), config_text)
+
+            forced = run_cli(["init", "--field", "other field", "--force"], root)
+            self.assertEqual(forced.returncode, 0, forced.stderr + forced.stdout)
+            self.assertIn("field: other field", run_cli(["status"], root).stdout)
+
+    def test_init_without_field_warns_about_bundled_default(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            init = run_cli(["init"], root)
+            self.assertEqual(init.returncode, 0, init.stderr + init.stdout)
+            self.assertIn("bundled battery-industry field applies", init.stdout)
+            self.assertIn("runner: codex", run_cli(["status"], root).stdout)
+
 
 if __name__ == "__main__":
     unittest.main()
