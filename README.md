@@ -77,8 +77,11 @@ See `USAGE_POLICY.md` for intended use and explicit non-goals.
 
 ## Install
 
+New user on macOS (Korean step-by-step, incl. `patent-loop init`): see `docs/QUICKSTART_KO.md`.
+
 ```bash
-python3 -m pip install -e .
+python3 -m pip install -e .   # needs Python 3.11+; macOS system python3 is 3.9
+patent-loop init --field "your target field"   # creates config/, state/, .gitignore in the cwd
 patent-loop status
 ```
 
